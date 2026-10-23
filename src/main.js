@@ -3,6 +3,19 @@ import './newton/newton-ui.js';
 import './jacobi/jacobi-ui.js';
 import './regression/regression-ui.js';
 import './lagrange/lagrange-ui.js';
+import { GROUP, COURSE, TEACHER, TEAM, initials } from './data/credits.js';
+import { esc } from './shared/format.js';
+
+/* Créditos del proyecto en la cabecera y el pie */
+document.querySelectorAll('[data-credit=group]').forEach((el) => (el.textContent = GROUP));
+document.querySelectorAll('[data-credit=course]').forEach((el) => (el.textContent = COURSE));
+document.querySelectorAll('[data-credit=teacher]').forEach((el) => (el.textContent = TEACHER));
+document.querySelectorAll('[data-credit=team]').forEach((el) => {
+  el.innerHTML = TEAM.map((n) => `<li><span class="initials" aria-hidden="true">${initials(n)}</span>${esc(n)}</li>`).join('');
+});
+document.querySelectorAll('[data-credit=team-plain]').forEach((el) => {
+  el.innerHTML = TEAM.map((n) => `<li>${esc(n)}</li>`).join('');
+});
 
 /* =========================================================
    Pestañas de métodos. Cada panel solo se oculta, así que
@@ -26,11 +39,12 @@ function activate(method, { focus = false } = {}) {
     tab.tabIndex = on ? 0 : -1;
     document.getElementById(tab.getAttribute('aria-controls')).hidden = !on;
     if (on && focus) tab.focus();
+    if (on) tab.parentElement.scrollLeft = tab.offsetLeft - 16; // en celular la pestaña activa queda visible
   });
   const { title, subtitle } = METHODS[method];
   document.getElementById('app-title').textContent = title;
   document.getElementById('app-subtitle').textContent = subtitle;
-  document.title = `${title} · Laboratorio Numérico`;
+  document.title = `${title} · Nexora`;
   history.replaceState(null, '', `#${method}`);
 }
 

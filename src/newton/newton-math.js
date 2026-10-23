@@ -33,37 +33,45 @@ export function equidistance(xs) {
   return { equi, h };
 }
 
-export function solveNewton({ points, m, used, xEval, mode, compare }) {
-  const xs = used.map((i) => points[i].x);
-  const ys = used.map((i) => points[i].y);
+/**
+ * Polinomio de Newton por los nodos (xs, ys), evaluado en xEval.
+ * Cada término k es a_k · Π_{l<k} (xEval − x_l); todo con precisión completa.
+ */
+export function newtonPolynomial(xs, ys, xEval) {
   const D = dividedDifferences(xs, ys);
   const coefs = D[0].slice();
-
   const terms = coefs.map((a, k) => {
     const diffs = xs.slice(0, k).map((xk) => xEval - xk);
     const prod = diffs.reduce((p, d) => p * d, 1);
     return { k, a, diffs, prod, value: a * prod };
   });
-  const value = terms.reduce((s, t) => s + t.value, 0);
-
-  let comparison = null;
-  if (compare) {
-    comparison = [];
-    for (let g = 1; g < points.length; g++) {
-      const gx = points.slice(0, g + 1).map((p) => p.x);
-      const gy = points.slice(0, g + 1).map((p) => p.y);
-      const gD = dividedDifferences(gx, gy);
-      const v = evalNewton(gD[0], gx, xEval);
-      const prev = comparison.length ? comparison[comparison.length - 1].value : null;
-      comparison.push({ g, xs: gx, value: v, change: prev === null ? null : Math.abs(v - prev) });
-    }
-  }
-
   return {
-    points, n: points.length, m, used, mode, xEval,
-    xs, ys, D, coefs, terms, value,
-    spacing: equidistance(xs),
+    m: xs.length - 1, xs, ys, D, coefs, terms,
+    value: terms.reduce((s, t) => s + t.value, 0),
     extrapolation: xEval < Math.min(...xs) || xEval > Math.max(...xs),
-    comparison,
+  };
+}
+
+/** P_g para g = 1 … n − 1, cada uno con los primeros g + 1 puntos en el orden ingresado. */
+export function newtonAllDegrees(points, xEval) {
+  const degrees = [];
+  for (let g = 1; g < points.length; g++) {
+    const nodes = points.slice(0, g + 1);
+    const poly = newtonPolynomial(nodes.map((p) => p.x), nodes.map((p) => p.y), xEval);
+    const prev = degrees.length ? degrees[degrees.length - 1].value : null;
+    degrees.push({ ...poly, g, change: prev === null ? null : Math.abs(poly.value - prev) });
+  }
+  return degrees;
+}
+
+export function solveNewton({ points, m, used, xEval, mode }) {
+  const xs = used.map((i) => points[i].x);
+  const ys = used.map((i) => points[i].y);
+  const poly = newtonPolynomial(xs, ys, xEval);
+  return {
+    ...poly,
+    points, n: points.length, m, used, mode, xEval,
+    spacing: equidistance(xs),
+    degrees: newtonAllDegrees(points, xEval),
   };
 }

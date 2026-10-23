@@ -11,7 +11,7 @@ const instances = new Map(); // id del lienzo → Chart
 
 export const SAMPLES = 400;
 
-export const PALETTE = ['#4f46e5', '#7c3aed', '#0891b2', '#db2777', '#059669', '#d97706', '#2563eb', '#9333ea'];
+export const PALETTE = ['#0e8a45', '#111a15', '#c27c12', '#2f6fd1', '#b8326b', '#6d4bc2', '#d0531f', '#0e7c86'];
 
 /** Muestras {x, y} de f en [a, b]; descarta valores no finitos. */
 export function sampleCurve(f, a, b, samples = SAMPLES) {

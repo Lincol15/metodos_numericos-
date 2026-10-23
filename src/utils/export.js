@@ -2,6 +2,9 @@
    Exportación: copiar texto, descargar CSV y vista imprimible.
    ========================================================= */
 
+import { GROUP, COURSE, TEACHER, TEAM } from '../data/credits.js';
+import { esc } from '../shared/format.js';
+
 /** Copia texto al portapapeles. Devuelve true si se logró. */
 export async function copyText(text) {
   try {
@@ -44,7 +47,9 @@ export function downloadCSV(filename, headers, rows) {
 /** Abre el diálogo de impresión con el contenido indicado (solo se imprime #print-root). */
 export function printReport(html) {
   const root = document.getElementById('print-root');
-  root.innerHTML = html;
+  root.innerHTML = `<div class="print-credits"><strong>Laboratorio Numérico, grupo ${esc(GROUP)}</strong><br>
+    Curso: ${esc(COURSE)}. Docente: ${esc(TEACHER)}.<br>
+    Integrantes: ${TEAM.map(esc).join(', ')}.</div>${html}`;
   document.body.classList.add('printing');
   const done = () => {
     document.body.classList.remove('printing');

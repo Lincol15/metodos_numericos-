@@ -43,7 +43,7 @@ src/ui/                     componentes de interfaz reutilizables
   tables.js                 editor i|xi|yi, importador con vista previa, tablas paginadas
   formulas.js               ayudas KaTeX (signos, matrices, fracciones)
   charts.js                 Chart.js: una instancia por gráfica, muestreo de curvas, zoom
-src/regression/regression-ui.js   entradas, desarrollo y eventos de regresión
+src/regression/regression-ui.js   hoja tipo Excel (cálculo automático) y cuadros de resultados
 src/lagrange/lagrange-ui.js       entradas, desarrollo y eventos de Lagrange
 src/newton/newton-ui.js, src/jacobi/jacobi-ui.js
 
@@ -58,7 +58,7 @@ tests/                      pruebas ejecutables (node:test)
 
 **Jacobi.** Cada iteración lee solo el vector anterior y escribe en uno nuevo. Se detiene cuando el cambio ‖x⁽ᵏ⁾ − x⁽ᵏ⁻¹⁾‖∞ y el residuo ‖Ax − b‖∞ son ambos ≤ tolerancia.
 
-**Newton.** Tabla triangular D[i][j] de diferencias divididas y polinomio en forma de Newton.
+**Newton.** Tabla triangular D[i][j] de diferencias divididas y polinomio en forma de Newton. Además se generan P_1 … P_{n−1} (cada P_g con los primeros g + 1 puntos), cada uno con nodos, fórmula, sustitución, operaciones y resultado, y una tabla comparativa.
 
 En todos los métodos los cálculos usan la precisión completa y solo se redondea al mostrar.
 

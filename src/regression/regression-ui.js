@@ -1,542 +1,483 @@
 /* =========================================================
-   Regresión polinomial: lectura de entradas, desarrollo y eventos.
-   Los cálculos viven en src/math/regression.js.
+   Regresión polinomial: hoja de cálculo tipo Excel y cuadros de resultados.
+   Se recalcula en cada edición; los cálculos viven en src/math/regression.js.
    ========================================================= */
 
-import { parseNumber, numberError, esc } from '../shared/format.js';
-import { polynomialRegression, regressionPreconditions, MIN_DEGREE, MAX_DEGREE } from '../math/regression.js';
-import { distinctCount } from '../math/statistics.js';
+import { parseNumber, formatNumber, esc } from '../shared/format.js';
+import { polynomialRegression, regressionPreconditions, powerSums, MIN_DEGREE, MAX_DEGREE } from '../math/regression.js';
 import { parseValueList } from '../utils/parsing.js';
-import { copyText, downloadCSV, printReport, printableClone } from '../utils/export.js';
+import { downloadCSV, printReport, printableClone } from '../utils/export.js';
 import { REGRESSION_EXAMPLE } from '../data/examples.js';
-import { createPointEditor, createPasteImporter, pagedTable, expandAllPages } from '../ui/tables.js';
-import { tex, texBlock, texNum, texIn, texParen, texSignedSum, texMatrix, texColumn, texPow, texMinus } from '../ui/formulas.js';
+import { tex, texNum, texIn, texSignedSum, texMatrix, texColumn, texPow } from '../ui/formulas.js';
 import { mountPlot, sampleCurve, paddedRange, curveStyle, pointStyle } from '../ui/charts.js';
 
-const MAX_ROWS = 1000;
+const DECIMAL_OPTIONS = [2, 3, 4, 5, 6, 8];
 const DEFAULT_DECIMALS = 4;
+const DEFAULT_DEGREE = 2;
+const EMPTY_ROWS = 3;
+const MAX_ROWS = 1000;
+const CURVE_SAMPLES = 200;
 
 const $ = (s) => document.querySelector(s);
 const els = {
-  input: $('#reg-input'),
   degree: $('#reg-degree'),
-  degreeHint: $('#reg-degree-hint'),
-  decimals: $('#reg-decimals'),
+  n: $('#reg-n'),
   predict: $('#reg-predict'),
   predictHint: $('#reg-predict-hint'),
-  predictMsg: $('#reg-predict-msg'),
+  decimals: $('#reg-decimals'),
   formMsg: $('#reg-form-msg'),
-  calc: $('#reg-calc'),
   example: $('#reg-example'),
   clear: $('#reg-clear'),
+  sheet: $('#reg-sheet'),
+  showFormulas: $('#reg-show-formulas'),
+  addRow: $('#reg-add-row'),
+  csv: $('#reg-csv'),
+  print: $('#reg-print'),
+  rowMsg: $('#reg-row-msg'),
   results: $('#reg-results'),
 };
 
-const state = { result: null, stale: false };
+const emptyRows = (k) => Array.from({ length: k }, () => ({ x: '', y: '' }));
+const state = { rows: emptyRows(EMPTY_ROWS), last: null };
+
 let DEC = DEFAULT_DECIMALS;
-const N = (v) => texNum(v, DEC); // número en LaTeX
-const H = (v) => tex(N(v)); // número renderizado
-const plain = (v) => (v === null || v === undefined ? '—' : Number.isFinite(v) ? texNum(v, DEC).replace(/\\times 10\^\{(-?\d+)\}/, 'e$1') : 'no finito');
+const fmt = (v) => (v === null || v === undefined ? '—' : formatNumber(v, DEC));
+const N = (v) => texNum(v, DEC);
+const fmtPlain = (v) => String(v).replace('-', '−');
+const degree = () => Number(els.degree.value);
 
-const editor = createPointEditor($('#reg-points'), {
-  prefix: 'reg', label: 'Datos (xᵢ, yᵢ)', maxRows: MAX_ROWS, initialRows: 5, startIndex: 1,
-  onChange: () => { updateDegreeHint(); markStale(); },
-});
-const importer = createPasteImporter($('#reg-paste'), {
-  prefix: 'reg', maxRows: MAX_ROWS,
-  onImport: (rows) => { editor.setRows(rows); els.formMsg.textContent = ''; },
-});
+/* ---------------- Columnas de la hoja ---------------- */
 
-/* ---------------- Entradas ---------------- */
-
-function updateDegreeHint() {
-  const rows = editor.getRows();
-  const xs = rows.map((r) => parseNumber(r.x).value).filter((v) => v !== undefined);
-  const m = Number(els.degree.value);
-  els.degreeHint.textContent = `Requiere n ≥ ${m + 1} y al menos ${m + 1} valores distintos de x. Ahora: n = ${rows.length}, x distintos válidos = ${distinctCount(xs)}.`;
-}
-
-function updatePredictHint() {
-  const { values, errors, separator } = parseValueList(els.predict.value);
-  if (!els.predict.value.trim()) {
-    els.predictHint.textContent = 'Separa con punto y coma o saltos de línea (admiten coma decimal). La coma como separador solo con punto decimal.';
-    return;
+/** Columnas calculadas para el grado m: potencias, productos con y, residuo² y desviación². */
+function computedColumns(m) {
+  const cols = [];
+  for (let k = 2; k <= 2 * m; k++) {
+    cols.push({ key: `p${k}`, head: `x<sub>i</sub><sup>${k}</sup>`, csv: `xi^${k}`, formula: `=xi^${k}` });
   }
-  els.predictHint.textContent = `Se interpreta${separator ? ` (separador: ${separator})` : ''}: ${values.length ? values.join(' ; ') : 'ningún valor válido'}${errors.length ? ` · ${errors.length} con error` : ''}`;
+  for (let k = 1; k <= m; k++) {
+    const xk = k === 1 ? 'x<sub>i</sub>' : `x<sub>i</sub><sup>${k}</sup>`;
+    const xkText = k === 1 ? 'xi' : `xi^${k}`;
+    cols.push({ key: `py${k}`, head: `${xk}·y<sub>i</sub>`, csv: `${xkText}*yi`, formula: `=${xkText}*yi` });
+  }
+  const poly = Array.from({ length: m + 1 }, (_, k) => (k === 0 ? 'a0' : k === 1 ? 'a1*xi' : `a${k}*xi^${k}`)).join('+');
+  cols.push({ key: 'res', head: `(P<sub>${m}</sub>(x<sub>i</sub>) − y<sub>i</sub>)²`, csv: `(P${m}(xi)-yi)^2`, formula: `=(${poly}-yi)^2` });
+  cols.push({ key: 'dev', head: '(y<sub>i</sub> − ȳ)²', csv: '(yi-media)^2', formula: '=(yi-media)^2' });
+  return cols;
 }
 
-function markStale() {
-  if (!state.result || state.stale) return;
-  state.stale = true;
-  els.results.classList.add('is-stale');
-  els.results.querySelectorAll('.export-btn').forEach((b) => (b.disabled = true));
-  els.results.insertAdjacentHTML('afterbegin', staleBanner());
+/** Construye toda la hoja. Solo se llama ante cambios de estructura (filas, grado, fórmulas). */
+function buildSheet() {
+  const m = degree();
+  const cols = computedColumns(m);
+  const formulaRow = els.showFormulas.checked
+    ? `<tr class="formula-row"><td></td><td>dato</td><td>dato</td>${cols.map((c) => `<td>${esc(c.formula)}</td>`).join('')}<td></td></tr>`
+    : '';
+  const body = state.rows
+    .map((r, i) => `
+      <tr data-row="${i}">
+        <td class="idx">${i + 1}</td>
+        <td><input class="cell-input" data-row="${i}" data-field="x" value="${esc(r.x)}" inputmode="decimal" spellcheck="false" autocomplete="off" aria-label="x de la fila ${i + 1}"></td>
+        <td><input class="cell-input" data-row="${i}" data-field="y" value="${esc(r.y)}" inputmode="decimal" spellcheck="false" autocomplete="off" aria-label="y de la fila ${i + 1}"></td>
+        ${cols.map((c) => `<td class="calc" data-col="${c.key}"></td>`).join('')}
+        <td><button type="button" class="icon-btn" data-del="${i}" aria-label="Eliminar fila ${i + 1}" ${state.rows.length === 1 ? 'disabled' : ''}>✕</button></td>
+      </tr>`)
+    .join('');
+  els.sheet.innerHTML = `
+    <thead>
+      <tr><th>i</th><th>x<sub>i</sub></th><th>y<sub>i</sub></th>${cols.map((c) => `<th>${c.head}</th>`).join('')}<th><span class="sr-only">Eliminar</span></th></tr>
+      ${formulaRow}
+    </thead>
+    <tbody>${body}</tbody>
+    <tfoot>
+      <tr><td>suma</td><td class="calc" data-sum="x"></td><td class="calc" data-sum="y"></td>${cols.map((c) => `<td class="calc" data-sum="${c.key}"></td>`).join('')}<td></td></tr>
+    </tfoot>`;
+  els.addRow.disabled = state.rows.length >= MAX_ROWS;
+  update();
 }
-const staleBanner = () =>
-  '<div class="stale-banner" role="status">Las entradas cambiaron. Estos resultados ya no son vigentes: presiona <strong>Calcular</strong> para actualizarlos. La exportación está desactivada.</div>';
 
-function readInputs() {
-  editor.clearErrors();
-  els.predict.classList.remove('invalid');
-  els.predictMsg.textContent = '';
-  els.formMsg.textContent = '';
+/* ---------------- Lectura de datos ---------------- */
 
-  const rows = editor.getRows();
-  const xs = [];
-  const ys = [];
-  rows.forEach((r) => {
+/** Clasifica cada fila: vacía, válida o con celdas no válidas (no se usa). */
+function readRows() {
+  return state.rows.map((r) => {
     const px = parseNumber(r.x);
     const py = parseNumber(r.y);
-    if (numberError(px)) editor.setError(r.id, 'x', numberError(px, 'Requerido'));
-    if (numberError(py)) editor.setError(r.id, 'y', numberError(py, 'Requerido'));
-    xs.push(px.value);
-    ys.push(py.value);
+    if (px.empty && py.empty) return { status: 'empty' };
+    const bad = [];
+    if (px.value === undefined) bad.push({ field: 'x', reason: px.empty ? 'falta x' : 'x no es numérico' });
+    if (py.value === undefined) bad.push({ field: 'y', reason: py.empty ? 'falta y' : 'y no es numérico' });
+    return bad.length ? { status: 'invalid', bad } : { status: 'ok', x: px.value, y: py.value };
+  });
+}
+
+function readPredictions() {
+  const { values, errors } = parseValueList(els.predict.value);
+  els.predict.classList.toggle('invalid', errors.length > 0);
+  if (errors.length) els.predictHint.textContent = `No se pudo leer: ${errors.map((e) => e.token).join(', ')}. Separa los valores con coma y usa punto decimal.`;
+  else els.predictHint.textContent = values.length ? `Se evaluará en x = ${values.map(fmtPlain).join('; ')}` : '';
+  return values;
+}
+
+/* ---------------- Cálculo y actualización ---------------- */
+
+function update() {
+  DEC = Number(els.decimals.value);
+  const m = degree();
+  const rows = readRows();
+  const validIdx = rows.map((r, i) => (r.status === 'ok' ? i : -1)).filter((i) => i >= 0);
+  const xs = validIdx.map((i) => rows[i].x);
+  const ys = validIdx.map((i) => rows[i].y);
+  const predictX = readPredictions();
+  els.n.textContent = String(xs.length);
+
+  // Marcas de validación sin reconstruir las celdas (el foco y el cursor se conservan)
+  els.sheet.querySelectorAll('tbody tr').forEach((tr, i) => {
+    const r = rows[i];
+    tr.classList.toggle('row-invalid', r.status === 'invalid');
+    tr.querySelectorAll('input[data-field]').forEach((inp) => {
+      const bad = r.status === 'invalid' && r.bad.find((b) => b.field === inp.dataset.field);
+      inp.classList.toggle('invalid', Boolean(bad));
+      inp.title = bad ? `Esta fila no se usa: ${bad.reason}` : '';
+    });
+  });
+  const unused = rows.map((r, i) => (r.status === 'invalid' ? `fila ${i + 1} (${r.bad.map((b) => b.reason).join(', ')})` : null)).filter(Boolean);
+  els.rowMsg.textContent = unused.length ? `No se usan en el cálculo: ${unused.join('; ')}.` : '';
+
+  // Ajuste
+  let result = null;
+  let message = '';
+  if (!xs.length) {
+    message = 'Ingresa los puntos (xᵢ, yᵢ) en la tabla o pulsa «Cargar ejemplo».';
+  } else if (xs.length < m + 1) {
+    message = `Con grado m = ${m} necesitas al menos ${m + 1} puntos válidos (hay ${xs.length}).`;
+  } else {
+    const pre = regressionPreconditions(xs, m);
+    if (pre.length) message = pre.join(' ');
+    else {
+      try {
+        result = polynomialRegression(xs, ys, m, predictX);
+      } catch (err) {
+        message = err.message;
+      }
+    }
+  }
+  els.formMsg.textContent = message;
+  fillSheet(validIdx, xs, ys, m, result);
+  state.last = result;
+  if (result) renderResults(result);
+  else renderEmpty(message);
+}
+
+/** Escribe los valores calculados en la hoja (precisión completa en el cálculo; se redondea al mostrar). */
+function fillSheet(validIdx, xs, ys, m, r) {
+  const cols = computedColumns(m);
+  const sums = xs.length ? powerSums(xs, ys, m) : null;
+  const ybar = ys.length ? ys.reduce((s, v) => s + v, 0) / ys.length : null;
+  const pos = new Map(validIdx.map((i, k) => [i, k]));
+
+  els.sheet.querySelectorAll('tbody tr').forEach((tr, i) => {
+    const k = pos.get(i);
+    cols.forEach((c) => {
+      tr.querySelector(`[data-col="${c.key}"]`).innerHTML = k === undefined ? '' : fmt(cellValue(c.key, k, sums, ys, ybar, r));
+    });
   });
 
-  const m = Number(els.degree.value);
-  const pred = parseValueList(els.predict.value);
-  if (pred.errors.length) {
-    els.predict.classList.add('invalid');
-    els.predictMsg.textContent = `Valores no válidos: ${pred.errors.map((e) => `«${e.token}» (${e.message})`).join(', ')}`;
-  }
-
-  const errors = [];
-  if (editor.firstError()) errors.push('Revisa los datos marcados en rojo. Los campos vacíos no se toman como cero.');
-  if (pred.errors.length) errors.push('Corrige la lista de valores para predecir.');
-  if (!errors.length) errors.push(...regressionPreconditions(xs, m));
-  if (errors.length) {
-    els.formMsg.innerHTML = errors.map(esc).join('<br>');
-    (editor.firstError() ?? (pred.errors.length ? els.predict : null))?.focus();
-    return null;
-  }
-  return { rows, xs, ys, m, predict: pred.values, predictText: els.predict.value.trim() };
+  const foot = (key, html) => { els.sheet.querySelector(`[data-sum="${key}"]`).innerHTML = html; };
+  foot('x', sums ? fmt(sums.S[1]) : '—');
+  foot('y', sums ? fmt(sums.T[0]) : '—');
+  cols.forEach((c) => {
+    if (c.key === 'res') foot('res', r ? `<span class="sum-tag">S<sub>r</sub> =</span> ${fmt(r.Sr)}` : '—');
+    else if (c.key === 'dev') foot('dev', ybar === null ? '—' : `<span class="sum-tag">S<sub>t</sub> =</span> ${fmt(ys.reduce((s, y) => s + (y - ybar) ** 2, 0))}`);
+    else if (!sums) foot(c.key, '—');
+    else if (c.key.startsWith('py')) foot(c.key, fmt(sums.T[Number(c.key.slice(2))]));
+    else foot(c.key, fmt(sums.S[Number(c.key.slice(1))]));
+  });
 }
 
-function calculate() {
-  const input = readInputs();
-  if (!input) {
-    if (state.result) markStale();
-    return;
-  }
-  try {
-    state.result = { ...polynomialRegression(input.xs, input.ys, input.m, input.predict), input };
-  } catch (err) {
-    state.result = null;
-    els.formMsg.textContent = err.message;
-    els.results.classList.remove('is-stale');
-    els.results.innerHTML = `<article class="card step status-card status-error"><header class="step-head"><span class="step-num">!</span><h2>No se pudo calcular el ajuste</h2></header><p>${esc(err.message)}</p></article>`;
-    return;
-  }
-  state.stale = false;
-  render();
-  if (window.matchMedia('(max-width: 979px)').matches) els.results.scrollIntoView({ behavior: 'smooth', block: 'start' });
+function cellValue(key, k, sums, ys, ybar, r) {
+  const row = sums.rows[k];
+  if (key.startsWith('py')) return row.powY[Number(key.slice(2))];
+  if (key.startsWith('p')) return row.pow[Number(key.slice(1))];
+  if (key === 'res') return r ? r.residuals[k] ** 2 : null;
+  return (ys[k] - ybar) ** 2;
 }
 
-/* ---------------- Presentación ---------------- */
+/* ---------------- Cuadros de resultados ---------------- */
 
-const card = (num, title, body, { csv = null, extra = '' } = {}) => `
-  <article class="card step ${extra}" id="reg-step-${num}">
-    <header class="step-head"><span class="step-num">${num}</span><h2>${title}</h2>
-      ${csv ? `<button type="button" class="btn btn-ghost btn-sm export-btn head-btn" data-csv="${csv}">Exportar CSV</button>` : ''}
-    </header>
-    ${body}
-  </article>`;
-
-/** Polinomio con coeficientes numéricos y signos fusionados. */
-const polyTex = (a, m) =>
-  `P_{${m}}(x) = ${texSignedSum(a.map((v, k) => ({ v, body: (abs) => `${N(abs)}${k ? texPow('x', k) : ''}` })))}`;
-const polyGeneralTex = (m) =>
-  `P_{${m}}(x) = ${Array.from({ length: m + 1 }, (_, k) => `a_{${k}}${texPow('x', k)}`).join(' + ')}`;
-
-function render() {
-  const r = state.result;
-  DEC = Number(els.decimals.value);
-  els.results.classList.toggle('is-stale', state.stale);
-  els.results.innerHTML = [
-    state.stale ? staleBanner() : '',
-    renderSummary(r),
-    `<article class="card step"><header class="step-head"><span class="step-num">≈</span><h2>Gráfica</h2></header><div id="reg-plot"></div></article>`,
-    card(1, 'Tabla de sumatorias', renderSums(r), { csv: 'sums' }),
-    card(2, 'Ecuaciones normales C·a = b', renderNormal(r)),
-    card(3, 'Inversa de C por Gauss-Jordan', renderInverse(r)),
-    card(4, 'Coeficientes del polinomio', renderCoefs(r), { csv: 'coefs' }),
-    card(5, 'Residuos y error estándar', renderResiduals(r), { csv: 'residuals' }),
-    card(6, 'Determinación y correlación', renderFit(r), { csv: 'deviations' }),
-    card(7, 'Predicciones', renderPredictions(r), { csv: r.predictions.length ? 'predictions' : null }),
-  ].join('');
-  renderChart(r);
-  if (state.stale) els.results.querySelectorAll('.export-btn').forEach((b) => (b.disabled = true));
-}
-
-function renderSummary(r) {
-  const chips = [
-    ['n', r.n], ['m', r.m],
-    ['S<sub>r</sub>', plain(r.Sr)],
-    ['s', r.s === null ? 'no definido' : plain(r.s)],
-    ['R²', r.R2 === null ? 'no definido' : plain(r.R2)],
-    ['r<sub>xy</sub>', r.corr.r === null ? 'no definido' : plain(r.corr.r)],
-  ].map(([k, v]) => `<div class="metric"><span>${k}</span><strong>${v}</strong></div>`).join('');
-  const preds = r.predictions.map((p) => `<li>${tex(`P_{${r.m}}(${texIn(p.x)}) = ${N(p.value)}`)} <span class="tag ${p.extrapolation ? 'tag-warn' : 'tag-ok'}">${p.extrapolation ? 'Extrapolación' : 'Interpolación'}</span></li>`).join('');
-  return `
-    <div class="card summary-card">
-      <div class="summary-head">
-        <span class="status-pill status-ok-pill">Ajuste por mínimos cuadrados</span>
-        <div class="toolbar">
-          <button type="button" class="btn btn-ghost btn-sm export-btn" data-action="copy">Copiar resultados</button>
-          <button type="button" class="btn btn-ghost btn-sm export-btn" data-action="print">Vista imprimible</button>
-        </div>
-      </div>
-      ${texBlock(polyTex(r.fit.a, r.m))}
-      <div class="metrics">${chips}</div>
-      ${preds ? `<ul class="pred-list">${preds}</ul>` : ''}
-      ${r.comparison && !r.comparison.agree ? '<p class="alert">Las ecuaciones normales y QR no coinciden; ver paso 4.</p>' : ''}
-      <span class="copy-msg" role="status"></span>
+function renderEmpty(message) {
+  els.results.innerHTML = `
+    <div class="card empty-state reg-wide">
+      <h2>Aquí aparecerán los resultados</h2>
+      <p>${esc(message || 'Completa la tabla para ver el ajuste.')}</p>
     </div>`;
 }
 
+const card = (num, title, body, cls = '') => `
+  <article class="card step ${cls}" id="reg-card-${num}">
+    <header class="step-head"><span class="step-num">${num}</span><h2>${title}</h2></header>
+    ${body}
+  </article>`;
+
+/** Tabla etiqueta | fórmula | valor. */
+const resTable = (rows) => `
+  <div class="table-scroll"><table class="data-table res-table">
+    <thead><tr><th>Etiqueta</th><th>Fórmula</th><th>Valor</th></tr></thead>
+    <tbody>${rows.map(([label, formula, value]) => `<tr><th scope="row">${label}</th><td class="tex-cell">${formula}</td><td class="num-cell"><strong>${value}</strong></td></tr>`).join('')}</tbody>
+  </table></div>`;
+
+/** Coeficientes que se muestran: a = inv(C)·b; si perdió precisión se usa el ajuste estable. */
+function displayedCoefs(r) {
+  if (r.normal && r.comparison?.agree) return { a: r.normal.a, fromInverse: true };
+  return { a: r.fit.a, fromInverse: false };
+}
+
+/** P_m(x) con los coeficientes numéricos y signos fusionados. */
+function texPolynomial(a) {
+  return texSignedSum(a.map((v, k) => ({ v, body: (abs) => `${N(abs)}${k === 0 ? '' : `\\cdot ${texPow('x', k)}`}` })));
+}
+
+function renderResults(r) {
+  els.results.innerHTML = [
+    card(1, 'Error estándar y media', renderStdError(r)),
+    card(2, 'Coeficiente de determinación y de relación', renderDetermination(r)),
+    card(3, 'Sistema de ecuaciones normales C · a = b', renderSystem(r)),
+    card(4, 'inv(C)', renderInverse(r)),
+    card(5, 'Coeficientes a y polinomio', renderCoefs(r)),
+    card(6, 'Hallar y = ?', renderPredictions(r)),
+    card(7, 'Gráfica', '<div id="reg-plot"></div>', 'reg-wide'),
+  ].join('');
+  renderChart(r);
+}
+
+function renderStdError(r) {
+  const rows = [];
+  if (r.dof > 0) {
+    rows.push([
+      'Error estándar',
+      tex(`s = \\sqrt{\\dfrac{\\sum (P_{${r.m}}(x_i) - y_i)^2}{n - (m+1)}} = \\sqrt{\\dfrac{${N(r.Sr)}}{${r.n} - ${r.m + 1}}}`),
+      fmt(r.s),
+    ]);
+  } else {
+    rows.push(['Error estándar', tex('s = \\sqrt{\\dfrac{S_r}{n - (m+1)}}'), '—']);
+  }
+  rows.push(['Media', tex(`\\bar{y} = \\dfrac{\\sum y_i}{n} = \\dfrac{${N(r.sums.T[0])}}{${r.n}}`), fmt(r.ybar)]);
+  const warn = r.dof > 0
+    ? ''
+    : `<p class="alert">Con n = m + 1 = ${r.n} puntos el polinomio pasa exactamente por todos los puntos; como n − (m + 1) = 0, el error estándar no se puede calcular.</p>`;
+  return resTable(rows) + warn;
+}
+
+function strength(R) {
+  if (R >= 0.9) return 'muy alta';
+  if (R >= 0.7) return 'alta';
+  if (R >= 0.5) return 'media';
+  if (R >= 0.3) return 'baja';
+  return 'muy baja';
+}
+
+function renderDetermination(r) {
+  if (r.R2 === null) {
+    return '<p class="alert">Todos los y<sub>i</sub> son iguales (S<sub>t</sub> = 0), así que r² no está definido.</p>';
+  }
+  const rows = [
+    ['r²', tex(`r^2 = \\dfrac{S_t - S_r}{S_t} = \\dfrac{${N(r.St)} - ${N(r.Sr)}}{${N(r.St)}}`), fmt(r.R2)],
+    ['r', tex(`r = \\sqrt{r^2} = \\sqrt{${N(r.R2)}}`), fmt(r.R)],
+  ];
+  const xbar = r.xs.reduce((s, v) => s + v, 0) / r.n;
+  const cov = r.xs.reduce((s, x, i) => s + (x - xbar) * (r.ys[i] - r.ybar), 0);
+  const direction = cov > 0 ? 'directa' : cov < 0 ? 'inversa' : 'sin tendencia lineal (covarianza nula)';
+  return `${resTable(rows)}
+    <p class="interpret">El ${(r.R2 * 100).toFixed(2)}% de la variabilidad de y en función de x está explicada por el modelo. La relación entre las variables es ${direction} y es ${strength(r.R)}.</p>`;
+}
+
+function renderSystem(r) {
+  const C = r.C.map((row) => row.map((v) => texIn(v)));
+  const aSym = Array.from({ length: r.m + 1 }, (_, k) => `a_{${k}}`);
+  return `
+    <div class="tex-block">${tex(`${texMatrix(C)} \\cdot ${texColumn(aSym)} = ${texColumn(r.b.map(N))}`, true)}</div>
+    <p class="note">C es de ${r.m + 1}×${r.m + 1} con C<sub>ij</sub> = Σx<sub>k</sub><sup>i+j</sup> (i, j = 0 … ${r.m}); por eso C<sub>00</sub> = Σx<sup>0</sup> = n = ${r.n}. Cada b<sub>i</sub> = Σx<sub>k</sub><sup>i</sup>·y<sub>k</sub>. Todas las sumas salen de la fila «suma» de la tabla.</p>`;
+}
+
+function renderInverse(r) {
+  if (!r.gj.ok) {
+    return `<p class="alert alert-error">La matriz C es singular (o casi singular) y no tiene inversa. ${esc(r.gj.reason ?? '')} Revisa que haya al menos ${r.m + 1} valores distintos de x o usa un grado menor.</p>`;
+  }
+  const inv = r.gj.inverse.map((row) => row.map(N));
+  const caution = r.gj.reliable === false && r.gj.reason ? `<p class="alert">${esc(r.gj.reason)}</p>` : '';
+  return `
+    <div class="tex-block">${tex(`C^{-1} = ${texMatrix(inv)}`, true)}</div>
+    <p class="note">Calculada con Gauss-Jordan con pivoteo parcial. En Excel: MINVERSA (MINVERSE en inglés).</p>${caution}`;
+}
+
+function renderCoefs(r) {
+  const { a, fromInverse } = displayedCoefs(r);
+  const rows = a.map((v, k) => [`a<sub>${k}</sub>`, tex(`a_{${k}} = \\sum_{j=0}^{${r.m}} C^{-1}_{${k}j}\\, b_j`), fmt(v)]);
+  const note = fromInverse
+    ? ''
+    : '<p class="alert">inv(C)·b perdió precisión con estos datos; los coeficientes mostrados provienen del ajuste estable (QR), que da el mismo modelo con más precisión.</p>';
+  return `
+    <div class="tex-block">${tex('a = C^{-1} \\cdot b', true)}</div>
+    ${resTable(rows)}${note}
+    <div class="poly-yellow">${tex(`P_{${r.m}}(x) = ${texPolynomial(a)}`)}</div>`;
+}
+
+function renderPredictions(r) {
+  if (!r.predictions.length) {
+    return '<p class="note">Escribe uno o más valores en «Hallar y = ? para x =», separados por coma, para evaluar el polinomio.</p>';
+  }
+  const { a } = displayedCoefs(r);
+  const symbolic = texSignedSum(a.map((_, k) => ({ v: 1, body: () => `a_{${k}}${k === 0 ? '' : `\\cdot ${texPow('(x)', k)}`}` })));
+  const rows = r.predictions
+    .map((p) => {
+      const xTex = texIn(p.x);
+      const numeric = texSignedSum(a.map((v, k) => ({ v, body: (abs) => `${N(abs)}${k === 0 ? '' : `\\cdot ${texPow(`(${xTex})`, k)}`}` })));
+      const tag = p.extrapolation ? ' <span class="tag tag-warn">Extrapolación</span>' : '';
+      return `<tr>
+        <td class="num-cell">${fmtPlain(p.x)}${tag}</td>
+        <td class="num-cell cell-yellow"><strong>${fmt(p.value)}</strong></td>
+        <td class="tex-cell">${tex(`P_{${r.m}}(${xTex}) = ${numeric} = ${N(p.value)}`)}</td>
+      </tr>`;
+    })
+    .join('');
+  const outside = r.predictions.filter((p) => p.extrapolation).map((p) => fmtPlain(p.x));
+  const warn = outside.length
+    ? `<p class="alert">x = ${outside.join(', ')} está fuera del rango de los datos [${fmtPlain(r.range[0])}, ${fmtPlain(r.range[1])}]: es una <strong>extrapolación</strong> y es menos fiable.</p>`
+    : '';
+  return `
+    <p class="note">${tex(`P_{${r.m}}(x) = ${symbolic}`)}</p>
+    <div class="table-scroll"><table class="data-table res-table">
+      <thead><tr><th>x</th><th>P<sub>${r.m}</sub>(x)</th><th>Reemplazo</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>${warn}`;
+}
+
 function renderChart(r) {
-  const allX = [...r.xs, ...r.predictions.map((p) => p.x)];
   mountPlot(document.getElementById('reg-plot'), {
     id: 'reg-chart',
-    baseRange: paddedRange(allX),
+    baseRange: paddedRange([...r.xs, ...r.predictions.map((p) => p.x)]),
     ariaLabel: `Datos y polinomio de regresión de grado ${r.m}`,
-    build: (a, b) => ({
+    build: (lo, hi) => ({
       datasets: [
-        pointStyle('Datos observados', '#334155', r.xs.map((x, i) => ({ x, y: r.ys[i] }))),
-        curveStyle(`P${r.m}(x) ajustado`, '#4f46e5', sampleCurve(r.fit.evaluate, a, b)),
-        ...(r.predictions.length ? [pointStyle('Predicciones', '#f59e0b', r.predictions.map((p) => ({ x: p.x, y: p.value })), { pointStyle: 'rectRot', pointRadius: 8 })] : []),
+        pointStyle('Datos (xᵢ, yᵢ)', '#111a15', r.xs.map((x, i) => ({ x, y: r.ys[i] }))),
+        curveStyle(`P${r.m}(x) ajustado`, '#0e8a45', sampleCurve(r.fit.evaluate, lo, hi, CURVE_SAMPLES)),
+        ...(r.predictions.length
+          ? [pointStyle('Predicciones', '#c27c12', r.predictions.map((p) => ({ x: p.x, y: p.value })), { pointStyle: 'rectRot', pointRadius: 8, pointHoverRadius: 10 })]
+          : []),
       ],
       keyY: [...r.ys, ...r.predictions.map((p) => p.value)],
     }),
   });
 }
 
-function sumsHeaders(m) {
-  const h = ['i', 'x<sub>i</sub>', 'y<sub>i</sub>'];
-  for (let k = 2; k <= 2 * m; k++) h.push(`x<sub>i</sub><sup>${k}</sup>`);
-  for (let k = 1; k <= m; k++) h.push(`x<sub>i</sub>${k > 1 ? `<sup>${k}</sup>` : ''}·y<sub>i</sub>`);
-  return h;
-}
-const sumsRow = (row, m) => [row.x, row.y, ...row.pow.slice(2, 2 * m + 1), ...row.powY.slice(1)];
-const sumsFoot = (r) => [r.sums.S[1], r.sums.T[0], ...r.sums.S.slice(2), ...r.sums.T.slice(1)];
+/* ---------------- Pegado desde Excel ---------------- */
 
-function renderSums(r) {
-  const m = r.m;
-  const rows = r.sums.rows.map((row, i) => [i + 1, ...sumsRow(row, m).map(plain)]);
-  const list = [
-    `S_0 = n = ${r.n}`,
-    ...r.sums.S.slice(1).map((v, k) => `S_{${k + 1}} = \\textstyle\\sum x_i${k + 1 > 1 ? `^{${k + 1}}` : ''} = ${N(v)}`),
-    ...r.sums.T.map((v, k) => `T_{${k}} = \\textstyle\\sum ${k ? `x_i${k > 1 ? `^{${k}}` : ''}` : ''}y_i = ${N(v)}`),
-  ];
-  return `
-    <p class="note">Para m = ${m} se necesitan las potencias x<sub>i</sub><sup>k</sup> hasta k = 2m = ${2 * m} y los productos x<sub>i</sub><sup>k</sup>·y<sub>i</sub> hasta k = m = ${m}. La última fila contiene las sumatorias.</p>
-    ${pagedTable({ headers: sumsHeaders(m), rows, foot: ['Σ', ...sumsFoot(r).map(plain)], cls: 'num-table' })}
-    <div class="tex-grid">${list.map((s) => `<div>${tex(s)}</div>`).join('')}</div>`;
-}
-
-function renderNormal(r) {
-  const m = r.m;
-  const sym = (k) => (k === 0 ? 'n' : `\\sum x_i${k > 1 ? `^{${k}}` : ''}`);
-  const symT = (k) => `\\sum ${k ? `x_i${k > 1 ? `^{${k}}` : ''}` : ''}y_i`;
-  const general = Array.from({ length: m + 1 }, (_, p) =>
-    `${Array.from({ length: m + 1 }, (_, q) => `a_{${q}}${sym(p + q)}`).join(' + ')} &= ${symT(p)}`).join(' \\\\ ');
-  const subst = Array.from({ length: m + 1 }, (_, p) =>
-    `${texSignedSum(r.C[p].map((v, q) => ({ v, body: (abs) => `${p + q === 0 ? texIn(abs) : N(abs)}\\,a_{${q}}` })))} &= ${N(r.b[p])}`).join(' \\\\ ');
-  return `
-    <p class="note">Al derivar S<sub>r</sub> = Σ[y<sub>i</sub> − P<sub>m</sub>(x<sub>i</sub>)]² respecto de cada a<sub>p</sub> e igualar a cero se obtienen m + 1 = ${m + 1} ecuaciones con C<sub>pq</sub> = Σx<sub>i</sub><sup>p+q</sup> y b<sub>p</sub> = Σx<sub>i</sub><sup>p</sup>y<sub>i</sub>.</p>
-    <h3 class="sub-title">Forma general</h3>
-    ${texBlock(`\\begin{aligned} ${general} \\end{aligned}`)}
-    <h3 class="sub-title">Con los valores del ejercicio</h3>
-    ${texBlock(`\\begin{aligned} ${subst} \\end{aligned}`)}
-    <h3 class="sub-title">Forma matricial</h3>
-    ${texBlock(`\\underbrace{${texMatrix(r.C.map((row) => row.map(N)))}}_{C} ${texColumn(r.C.map((_, k) => `a_{${k}}`))} = \\underbrace{${texColumn(r.b.map(N))}}_{b}`)}`;
+function pasteInto(rowIdx, field, text) {
+  let lines = text.replace(/\r/g, '').split('\n');
+  while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+  // Encabezado: primera línea sin ningún número
+  if (lines.length > 1 && lines[0].split('\t').every((c) => parseNumber(c).value === undefined)) lines = lines.slice(1);
+  lines.forEach((line, k) => {
+    const i = rowIdx + k;
+    if (i >= MAX_ROWS) return;
+    while (state.rows.length <= i) state.rows.push({ x: '', y: '' });
+    const cells = line.split('\t').map((c) => c.trim());
+    if (field === 'x') {
+      state.rows[i].x = cells[0] ?? '';
+      if (cells.length > 1) state.rows[i].y = cells[1];
+    } else {
+      state.rows[i].y = cells[0] ?? '';
+    }
+  });
+  buildSheet();
+  els.sheet.querySelector(`input[data-row="${rowIdx}"][data-field="${field}"]`)?.focus();
 }
 
-function renderInverse(r) {
-  const gj = r.gj;
-  const n = r.m + 1;
-  const aug = (M) => texMatrix(M.map((row) => row.map(N)), { split: n });
-  const F = (i) => `F_{${i + 1}}`;
-  const steps = gj.steps.map((s) => {
-    const ops = [];
-    if (s.swap) ops.push(`${F(s.swap.to)} \\leftrightarrow ${F(s.swap.from)}`);
-    s.ops.forEach((o) => {
-      if (o.type === 'normalize') ops.push(`${F(o.row)} \\leftarrow ${F(o.row)} \\div ${texParen(N(o.factor), o.factor)}`);
-      else ops.push(`${F(o.row)} \\leftarrow ${texMinus(F(o.row), o.factor, (v) => `${N(v)}\\,`)}${F(s.col)}`);
-    });
-    return `
-      <details class="gj-step" ${n <= 3 ? 'open' : ''}>
-        <summary>Columna ${s.col + 1}: pivote ${tex(N(s.pivot))}${s.swap ? ` · intercambio de filas ${s.swap.from + 1} ↔ ${s.swap.to + 1}` : ''}</summary>
-        <div class="gj-body">
-          <ol class="op-list">${ops.map((o) => `<li>${tex(o)}</li>`).join('')}</ol>
-          ${texBlock(aug(s.matrix))}
-        </div>
-      </details>`;
-  }).join('');
+/* ---------------- Exportar e imprimir ---------------- */
 
-  const head = `
-    <p class="note">Se forma la matriz aumentada [C | I] y se aplican operaciones de fila hasta obtener [I | C⁻¹]. En cada columna se elige como pivote el elemento de mayor valor absoluto (pivoteo parcial); se acepta solo si supera la tolerancia ${tex(N(gj.pivotTol))} = n·ε·máx|C<sub>ij</sub>|, relativa a la escala de la matriz.</p>
-    <h3 class="sub-title">Matriz aumentada inicial [C | I]</h3>
-    ${texBlock(aug(gj.initial))}
-    <div class="inline-actions no-print">
-      <button type="button" class="btn btn-ghost btn-sm" data-action="gj-open">Expandir operaciones</button>
-      <button type="button" class="btn btn-ghost btn-sm" data-action="gj-close">Contraer operaciones</button>
-    </div>
-    ${steps}`;
-
-  if (!gj.ok) {
-    return `${head}
-      <p class="alert alert-error"><strong>No se obtuvo una inversa fiable.</strong> ${esc(gj.reason)} Por eso no se muestran C⁻¹ ni a = C⁻¹·b. El ajuste se resolvió con el método estable QR (paso 4).</p>`;
-  }
-  const condText = Number.isFinite(gj.cond) ? N(gj.cond) : '\\infty';
-  return `${head}
-    <h3 class="sub-title">Resultado [I | C⁻¹]</h3>
-    ${texBlock(aug(gj.steps.at(-1).matrix))}
-    ${texBlock(`C^{-1} = ${texMatrix(gj.inverse.map((row) => row.map(N)))}`)}
-    <p class="note">Comprobación: ${tex(`\\lVert C\\,C^{-1} - I \\rVert_\\infty = ${N(gj.checkError)}`)}. Número de condición estimado ${tex(`\\kappa_\\infty(C) = \\lVert C\\rVert_\\infty \\lVert C^{-1}\\rVert_\\infty \\approx ${condText}`)}.</p>
-    ${gj.reliable ? '' : '<p class="alert"><strong>Advertencia numérica:</strong> C está mal condicionada; la inversa calculada puede tener pocas cifras correctas. Por eso los resultados oficiales se obtienen con QR.</p>'}`;
-}
-
-function renderCoefs(r) {
-  const m = r.m;
-  let product = '';
-  if (r.normal) {
-    const inv = r.normal.inverse;
-    product = Array.from({ length: m + 1 }, (_, p) => {
-      const terms = inv[p].map((c, q) => `${texParen(N(c), c)}\\,${texParen(N(r.b[q]), r.b[q])}`).join(' + ');
-      return texBlock(`a_{${p}} = \\sum_{q} (C^{-1})_{${p}q}\\, b_q = ${terms} = ${N(r.normal.a[p])}`);
-    }).join('');
-  }
-  const cmp = r.comparison;
-  const rows = r.fit.a.map((a, j) => [
-    `a<sub>${j}</sub>`,
-    r.normal ? H(r.normal.a[j]) : '—',
-    H(a),
-    r.normal ? H(cmp.coefDiff[j]) : '—',
+function sheetMatrix() {
+  const cols = computedColumns(degree());
+  const text = (td) => td.textContent.replace(/S[rt] =\s*/, '').replace(/−/g, '-').trim();
+  const headers = ['i', 'xi', 'yi', ...cols.map((c) => c.csv)];
+  const rows = [...els.sheet.querySelectorAll('tbody tr')].map((tr, i) => [
+    i + 1, state.rows[i].x, state.rows[i].y,
+    ...cols.map((c) => text(tr.querySelector(`[data-col="${c.key}"]`))),
   ]);
-  let verdict;
-  if (!r.normal) verdict = '<p class="alert">No hay resultado por C⁻¹·b (la inversa no fue fiable). Se usan los coeficientes obtenidos por QR.</p>';
-  else if (cmp.agree) verdict = `<p class="alert alert-ok">Ambos procedimientos coinciden: la mayor diferencia relativa en los valores ajustados es ${tex(N(cmp.fitDiff))}.</p>`;
-  else verdict = `<p class="alert alert-error"><strong>Discrepancia numérica relevante:</strong> los valores ajustados difieren hasta ${tex(N(cmp.fitDiff))} (relativo a máx|y<sub>i</sub>|). Las ecuaciones normales amplifican los errores de redondeo; los resultados válidos son los de QR. No deben tomarse ambos como iguales.</p>`;
-
-  return `
-    <h3 class="sub-title">Procedimiento didáctico: a = C⁻¹·b</h3>
-    ${r.normal ? product : '<p class="note">No disponible porque no se obtuvo una inversa fiable.</p>'}
-    <h3 class="sub-title">Procedimiento estable: QR de Householder</h3>
-    <p class="note">Se resuelve el mismo problema de mínimos cuadrados con la matriz de diseño en la variable centrada y escalada
-      ${tex(`t = \\dfrac{x - c}{h}`)}, con ${tex(`c = ${N(r.fit.center)}`)} y ${tex(`h = ${N(r.fit.halfWidth)}`)}, sin formar C. Luego los coeficientes se convierten a la variable x original. Esta representación es la que se usa para evaluar, predecir y graficar.</p>
-    ${pagedTable({ headers: ['Coeficiente', 'C⁻¹·b', 'QR (usado)', '|Diferencia|'], rows })}
-    ${verdict}
-    <h3 class="sub-title">Polinomio</h3>
-    ${texBlock(polyGeneralTex(m))}
-    ${texBlock(polyTex(r.fit.a, m))}
-    <p class="note">Los coeficientes se muestran redondeados a ${DEC} decimales; todos los cálculos usan la precisión completa.</p>`;
-}
-
-function renderResiduals(r) {
-  const rows = r.xs.map((x, i) => [i + 1, plain(x), plain(r.ys[i]), plain(r.fitted[i]), plain(r.residuals[i]), plain(r.residuals[i] ** 2)]);
-  let sText;
-  if (r.dof > 0) {
-    sText = texBlock(`s = \\sqrt{\\dfrac{S_r}{gl}} = \\sqrt{\\dfrac{${N(r.Sr)}}{${r.dof}}} = ${N(r.s)}`);
-  } else {
-    sText = `<p class="alert"><strong>Error estándar no definido: cero grados de libertad</strong> (n = m + 1 = ${r.n}).
-      ${r.distinctX ? 'Como los x<sub>i</sub> son distintos, el polinomio interpola los datos: en aritmética exacta todos los residuos son 0. Los residuos que aparezcan son errores de redondeo, no error de ajuste.' : ''}</p>`;
-  }
-  return `
-    <p class="note">P<sub>m</sub>(x<sub>i</sub>) se evalúa con la representación estable y la precisión completa.</p>
-    ${pagedTable({ headers: ['i', 'x<sub>i</sub>', 'y<sub>i</sub>', 'P<sub>m</sub>(x<sub>i</sub>)', 'e<sub>i</sub> = y<sub>i</sub> − P<sub>m</sub>(x<sub>i</sub>)', 'e<sub>i</sub>²'], rows, foot: ['Σ', '', '', '', '', plain(r.Sr)], cls: 'num-table' })}
-    ${texBlock(`S_r = \\sum e_i^2 = ${N(r.Sr)}, \\qquad gl = n - (m+1) = ${r.n} - ${r.m + 1} = ${r.dof}`)}
-    ${sText}`;
-}
-
-function strength(r) {
-  const a = Math.abs(r);
-  if (a < 0.1) return 'muy débil o nula';
-  if (a < 0.5) return 'débil';
-  if (a < 0.8) return 'moderada';
-  return 'fuerte';
-}
-
-function renderFit(r) {
-  const c = r.corr;
-  const rows = r.xs.map((x, i) => [i + 1, plain(x), plain(r.ys[i]), plain(c.dy[i]), plain(c.dy[i] ** 2), plain(c.dx[i]), plain(c.dx[i] ** 2), plain(c.dx[i] * c.dy[i])]);
-  const r2Block = r.R2 === null
-    ? '<p class="alert"><strong>R² no definido:</strong> S<sub>t</sub> = 0 porque todos los y<sub>i</sub> son iguales; no hay variabilidad que explicar.</p>'
-    : `${texBlock(`R^2 = 1 - \\dfrac{S_r}{S_t} = 1 - \\dfrac{${N(r.Sr)}}{${N(r.St)}} = ${N(r.R2)}`)}
-       <p class="interpret">El modelo explica aproximadamente el <strong>${(r.R2 * 100).toFixed(Math.min(DEC, 4))} %</strong> de la variabilidad observada de y en estos datos.</p>
-       ${texBlock(`R = \\sqrt{R^2} = ${N(r.R)}`)}
-       <p class="note"><strong>R múltiple del ajuste.</strong> Es no negativo y mide qué tan cerca están los valores ajustados de los observados; no indica una dirección directa o inversa. Un R² alto describe estos datos, no garantiza predicciones fiables fuera de ellos.</p>`;
-
-  let pearsonText;
-  if (c.r === null) {
-    pearsonText = `<p class="alert"><strong>Correlación no definida:</strong> ${c.sxx === 0 ? 'x' : 'y'} tiene varianza cero.</p>`;
-  } else {
-    const dir = Math.abs(c.r) < 0.1 ? '' : c.r > 0 ? ' directa (cuando x aumenta, y tiende a aumentar)' : ' inversa (cuando x aumenta, y tiende a disminuir)';
-    pearsonText = `${texBlock(`r_{xy} = \\dfrac{\\sum (x_i-\\bar x)(y_i-\\bar y)}{\\sqrt{\\sum (x_i-\\bar x)^2 \\sum (y_i-\\bar y)^2}} = \\dfrac{${N(c.sxy)}}{\\sqrt{${N(c.sxx)} \\cdot ${N(c.syy)}}} = ${N(c.r)}`)}
-      <p class="interpret">Asociación lineal ${strength(c.r)}${dir}.${Math.abs(c.r) < 0.5 ? ' Un valor cercano a cero indica poca asociación <em>lineal</em>, aunque puede existir una relación curva.' : ''}</p>
-      <p class="note">r<sub>xy</sub> describe solo la tendencia lineal entre x e y. No implica que el polinomio ajustado sea creciente o decreciente en todo el intervalo.</p>`;
-  }
-
-  return `
-    ${texBlock(`\\bar y = \\dfrac{\\sum y_i}{n} = \\dfrac{${N(r.sums.T[0])}}{${r.n}} = ${N(r.ybar)}, \\qquad \\bar x = ${N(c.xbar)}`)}
-    ${pagedTable({
-      headers: ['i', 'x<sub>i</sub>', 'y<sub>i</sub>', 'y<sub>i</sub> − ȳ', '(y<sub>i</sub> − ȳ)²', 'x<sub>i</sub> − x̄', '(x<sub>i</sub> − x̄)²', '(x<sub>i</sub> − x̄)(y<sub>i</sub> − ȳ)'],
-      rows, foot: ['Σ', '', '', '', plain(r.St), '', plain(c.sxx), plain(c.sxy)], cls: 'num-table',
-    })}
-    ${texBlock(`S_t = \\sum (y_i - \\bar y)^2 = ${N(r.St)}`)}
-    <h3 class="sub-title">Coeficiente de determinación</h3>
-    ${r2Block}
-    <h3 class="sub-title">Correlación de Pearson entre x e y</h3>
-    ${pearsonText}`;
-}
-
-function renderPredictions(r) {
-  if (!r.predictions.length) return '<p class="note">No se ingresaron valores de x para predecir.</p>';
-  const [lo, hi] = r.range;
-  return r.predictions.map((p) => {
-    const xs = texParen(texIn(p.x), p.x);
-    const subst = p.terms.map((t) => (t.k === 0 ? N(t.a) : `${texParen(N(t.a), t.a)}\\,${t.k === 1 ? xs : `${xs}^{${t.k}}`}`)).join(' + ');
-    const values = texSignedSum(p.terms.map((t) => ({ v: t.value, body: N })));
-    const mismatch = Math.abs(p.termSum - p.value) > 1e-9 * Math.max(1, Math.abs(p.value));
-    return `
-      <div class="prediction">
-        <div class="pred-head">${tex(`x = ${texIn(p.x)}`)}
-          <span class="tag ${p.extrapolation ? 'tag-warn' : 'tag-ok'}">${p.extrapolation ? 'Extrapolación' : 'Interpolación'}</span></div>
-        ${texBlock(`P_{${r.m}}(${texIn(p.x)}) = ${subst}`)}
-        ${texBlock(`= ${values}`)}
-        <div class="result-box compact"><div class="result-value">${tex(`P_{${r.m}}(${texIn(p.x)}) = ${N(p.value)}`)}</div></div>
-        ${p.extrapolation
-          ? `<p class="alert">x = ${texIn(p.x)} está fuera del rango observado [${texIn(lo)}, ${texIn(hi)}]: es una <strong>extrapolación</strong>. Su fiabilidad es menor porque el modelo no tiene datos que lo respalden en esa zona.</p>`
-          : `<p class="note">x está dentro del rango observado [${texIn(lo)}, ${texIn(hi)}] (interpolación).</p>`}
-        ${mismatch ? '<p class="note">La suma de los términos y el valor destacado difieren levemente: el valor destacado se calcula con la representación estable.</p>' : ''}
-      </div>`;
-  }).join('');
-}
-
-/* ---------------- Exportación ---------------- */
-
-function csvFor(kind) {
-  const r = state.result;
-  const m = r.m;
-  if (kind === 'sums') {
-    const h = ['i', 'x', 'y'];
-    for (let k = 2; k <= 2 * m; k++) h.push(`x^${k}`);
-    for (let k = 1; k <= m; k++) h.push(k === 1 ? 'x*y' : `x^${k}*y`);
-    return [h, [...r.sums.rows.map((row, i) => [i + 1, ...sumsRow(row, m)]), ['Suma', ...sumsFoot(r)]]];
-  }
-  if (kind === 'coefs') return [['coeficiente', 'C_inv_b', 'QR'], r.fit.a.map((a, j) => [`a${j}`, r.normal ? r.normal.a[j] : '', a])];
-  if (kind === 'residuals') return [['i', 'x', 'y', 'P(x)', 'e', 'e^2'], r.xs.map((x, i) => [i + 1, x, r.ys[i], r.fitted[i], r.residuals[i], r.residuals[i] ** 2])];
-  if (kind === 'deviations') {
-    const c = r.corr;
-    return [['i', 'x', 'y', 'y-ybar', '(y-ybar)^2', 'x-xbar', '(x-xbar)^2', '(x-xbar)(y-ybar)'], r.xs.map((x, i) => [i + 1, x, r.ys[i], c.dy[i], c.dy[i] ** 2, c.dx[i], c.dx[i] ** 2, c.dx[i] * c.dy[i]])];
-  }
-  return [['x', 'P(x)', 'tipo'], r.predictions.map((p) => [p.x, p.value, p.extrapolation ? 'extrapolación' : 'interpolación'])];
-}
-
-function resultText() {
-  const r = state.result;
-  const f = (v) => (v === null ? 'no definido' : plain(v));
-  const lines = [
-    'Laboratorio Numérico — Regresión polinomial por mínimos cuadrados',
-    `Datos (n = ${r.n}):`,
-    ...r.xs.map((x, i) => `  ${i + 1}\tx = ${x}\ty = ${r.ys[i]}`),
-    `Grado m = ${r.m}`,
-    `Coeficientes (QR): ${r.fit.a.map((a, j) => `a${j} = ${plain(a)}`).join(', ')}`,
-    `Sr = ${f(r.Sr)}; gl = ${r.dof}; s = ${r.s === null ? 'no definido (gl = 0)' : f(r.s)}`,
-    `R² = ${f(r.R2)}; R múltiple = ${f(r.R)}; r_xy = ${f(r.corr.r)}`,
-    ...r.predictions.map((p) => `P${r.m}(${p.x}) = ${plain(p.value)} (${p.extrapolation ? 'extrapolación' : 'interpolación'})`),
-  ];
-  return lines.join('\n');
+  rows.push(['suma', ...[...els.sheet.querySelectorAll('tfoot [data-sum]')].map(text)]);
+  return { headers, rows };
 }
 
 function printView() {
-  const r = state.result;
-  expandAllPages(els.results);
-  const data = r.xs.map((x, i) => `<tr><td>${i + 1}</td><td>${x}</td><td>${r.ys[i]}</td></tr>`).join('');
+  const { headers, rows } = sheetMatrix();
+  const table = `<table class="data-table"><thead><tr>${headers.map((h) => `<th>${esc(h)}</th>`).join('')}</tr></thead>
+    <tbody>${rows.map((r) => `<tr>${r.map((v) => `<td>${esc(String(v))}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
   printReport(`
-    <h1>Laboratorio Numérico — Regresión polinomial</h1>
-    <h2>Datos</h2>
-    <table class="data-table"><thead><tr><th>i</th><th>xi</th><th>yi</th></tr></thead><tbody>${data}</tbody></table>
-    <h2>Configuración</h2>
-    <p>Grado m = ${r.m} · n = ${r.n} · Decimales mostrados: ${DEC} · Predicciones: ${r.input.predictText || 'ninguna'}</p>
+    <h1>Regresión polinomial</h1>
+    <p>Grado m = ${degree()}, n = ${els.n.textContent}, ${DEC} decimales.</p>
+    <h2>Tabla de cálculo</h2>
+    <div class="table-scroll">${table}</div>
     <h2>Resultados</h2>
-    ${printableClone(els.results)}`);
+    ${state.last ? printableClone(els.results) : `<p>${esc(els.formMsg.textContent)}</p>`}`);
 }
 
 /* ---------------- Eventos ---------------- */
 
-els.results.addEventListener('click', async (e) => {
-  const btn = e.target.closest('button');
-  if (!btn || !state.result) return;
-  if (btn.dataset.csv) {
-    if (state.stale) return;
-    const [headers, rows] = csvFor(btn.dataset.csv);
-    downloadCSV(`regresion-${btn.dataset.csv}.csv`, headers, rows);
-  } else if (btn.dataset.action === 'copy' && !state.stale) {
-    const ok = await copyText(resultText());
-    const msg = els.results.querySelector('.copy-msg');
-    if (msg) msg.textContent = ok ? 'Resultados copiados al portapapeles.' : 'No se pudo copiar.';
-  } else if (btn.dataset.action === 'print' && !state.stale) {
-    printView();
-  } else if (btn.dataset.action === 'gj-open' || btn.dataset.action === 'gj-close') {
-    els.results.querySelectorAll('.gj-step').forEach((d) => (d.open = btn.dataset.action === 'gj-open'));
-  }
+els.sheet.addEventListener('input', (e) => {
+  const inp = e.target.closest('input[data-field]');
+  if (!inp) return;
+  state.rows[Number(inp.dataset.row)][inp.dataset.field] = inp.value;
+  update();
 });
 
-els.degree.addEventListener('change', () => { updateDegreeHint(); markStale(); });
-els.predict.addEventListener('input', () => {
-  updatePredictHint();
-  els.predict.classList.remove('invalid');
-  els.predictMsg.textContent = '';
-  markStale();
+els.sheet.addEventListener('paste', (e) => {
+  const inp = e.target.closest('input[data-field]');
+  const text = e.clipboardData?.getData('text') ?? '';
+  if (!inp || !/[\t\n]/.test(text.trim())) return; // un solo valor: pegado normal
+  e.preventDefault();
+  pasteInto(Number(inp.dataset.row), inp.dataset.field, text);
 });
-els.decimals.addEventListener('change', () => state.result && render());
-els.calc.addEventListener('click', calculate);
+
+els.sheet.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-del]');
+  if (!btn || state.rows.length === 1) return;
+  state.rows.splice(Number(btn.dataset.del), 1);
+  buildSheet();
+});
+
+els.addRow.addEventListener('click', () => {
+  if (state.rows.length >= MAX_ROWS) return;
+  state.rows.push({ x: '', y: '' });
+  buildSheet();
+  els.sheet.querySelector(`input[data-row="${state.rows.length - 1}"][data-field="x"]`)?.focus();
+});
+
+els.degree.addEventListener('change', buildSheet);
+els.showFormulas.addEventListener('change', buildSheet);
+els.decimals.addEventListener('change', update);
+els.predict.addEventListener('input', update);
 
 els.example.addEventListener('click', () => {
-  editor.setRows(REGRESSION_EXAMPLE.points);
+  state.rows = REGRESSION_EXAMPLE.points.map((p) => ({ x: p.x, y: p.y }));
   els.degree.value = String(REGRESSION_EXAMPLE.degree);
   els.predict.value = REGRESSION_EXAMPLE.predict;
-  updatePredictHint();
-  updateDegreeHint();
-  calculate();
+  buildSheet();
 });
 
 els.clear.addEventListener('click', () => {
-  state.result = null;
-  state.stale = false;
-  editor.reset(5);
-  editor.clearErrors();
-  importer.clear();
-  els.degree.value = '2';
+  state.rows = emptyRows(EMPTY_ROWS);
   els.predict.value = '';
-  els.formMsg.textContent = '';
-  els.predictMsg.textContent = '';
-  updatePredictHint();
-  updateDegreeHint();
-  renderEmpty();
+  buildSheet();
 });
 
-function renderEmpty() {
-  els.results.classList.remove('is-stale');
-  els.results.innerHTML = `
-    <div class="card empty-state">
-      <div class="empty-icon" aria-hidden="true"><svg viewBox="0 0 64 64"><path d="M8 50 C24 46, 40 34, 56 12" /><circle cx="12" cy="44" r="3.5"/><circle cx="22" cy="48" r="3.5"/><circle cx="32" cy="36" r="3.5"/><circle cx="44" cy="30" r="3.5"/><circle cx="54" cy="14" r="3.5"/></svg></div>
-      <h2>Aquí verás el ajuste y todo su desarrollo</h2>
-      <p>Ingresa los datos (x<sub>i</sub>, y<sub>i</sub>), elige el grado m y presiona <strong>Calcular</strong>.</p>
-      <ol class="empty-steps">
-        <li>Tabla de sumatorias</li><li>Ecuaciones normales</li><li>Inversa por Gauss-Jordan</li><li>Coeficientes (C⁻¹b y QR)</li>
-        <li>Residuos y error estándar</li><li>R², R y Pearson</li><li>Predicciones</li>
-      </ol>
-    </div>`;
-}
+els.csv.addEventListener('click', () => {
+  const { headers, rows } = sheetMatrix();
+  downloadCSV('regresion-tabla.csv', headers, rows);
+});
+els.print.addEventListener('click', printView);
 
 /* ---------------- Inicio ---------------- */
 
 els.degree.innerHTML = Array.from({ length: MAX_DEGREE - MIN_DEGREE + 1 }, (_, k) => `<option value="${k + MIN_DEGREE}">${k + MIN_DEGREE}</option>`).join('');
-els.degree.value = '2';
-els.decimals.innerHTML = Array.from({ length: 9 }, (_, k) => `<option value="${k + 2}">${k + 2}</option>`).join('');
+els.degree.value = String(DEFAULT_DEGREE);
+els.decimals.innerHTML = DECIMAL_OPTIONS.map((d) => `<option value="${d}">${d}</option>`).join('');
 els.decimals.value = String(DEFAULT_DECIMALS);
-updateDegreeHint();
-updatePredictHint();
-renderEmpty();
+buildSheet();

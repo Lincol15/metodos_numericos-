@@ -1,6 +1,7 @@
 import { MINUS, parseNumber, splitPasted, formatNumber, formatInput, signedSum, frac, esc, toSub } from '../shared/format.js';
 import { niceTicks, tickLabel } from '../shared/chart.js';
 import { evalNewton, solveNewton } from './newton-math.js';
+import { downloadCSV, printReport, printableClone } from '../utils/export.js';
 
 /* =========================================================
    Configuración y estado
@@ -47,7 +48,6 @@ const els = {
   selFirst: $('#sel-first'),
   selManual: $('#sel-manual'),
   selHint: $('#selection-hint'),
-  compare: $('#compare-all'),
   formMsg: $('#form-msg'),
   calc: $('#btn-calc'),
   example: $('#btn-example'),
@@ -158,18 +158,31 @@ function renderRows() {
   updateSelectionHint();
 }
 
+/** Todos los grados de 1 a MAX_POINTS − 1; sin elección del usuario se propone n − 1. */
 function updateDegreeOptions() {
-  const max = state.rows.length - 1;
   const prev = Number(els.degree.value);
-  els.degree.innerHTML = Array.from({ length: max }, (_, k) => `<option value="${k + 1}">${k + 1}</option>`).join('');
-  els.degree.value = String(state.degreeTouched && prev >= 1 && prev <= max ? prev : max);
+  if (els.degree.options.length !== MAX_POINTS - 1) {
+    els.degree.innerHTML = Array.from({ length: MAX_POINTS - 1 }, (_, k) => `<option value="${k + 1}">${k + 1}</option>`).join('');
+  }
+  els.degree.value = String(state.degreeTouched && prev >= 1 ? prev : state.rows.length - 1);
   updateDegreeHint();
 }
 
 function updateDegreeHint() {
   const n = state.rows.length;
   const m = Number(els.degree.value);
-  els.degreeHint.innerHTML = `Entre 1 y n − 1 = ${n - 1}. Grado ${m} usa ${m + 1} puntos.`;
+  const missing = m + 1 > n ? ` <strong>${m + 1 - n === 1 ? 'Falta 1 fila' : `Faltan ${m + 1 - n} filas`}.</strong>` : '';
+  els.degreeHint.innerHTML = `Grado ${m} usa ${m + 1} puntos (máximo grado ${MAX_POINTS - 1} con ${MAX_POINTS} puntos). Ahora hay ${n} filas.${missing}`;
+}
+
+/** Si el grado pide más puntos que filas, agrega filas vacías para completarlos. */
+function ensureRowsForDegree() {
+  const need = Number(els.degree.value) + 1;
+  if (need <= state.rows.length) return 0;
+  const added = need - state.rows.length;
+  while (state.rows.length < need) state.rows.push(emptyRow());
+  renderRows();
+  return added;
 }
 
 const isManual = () => els.selManual.checked;
@@ -274,7 +287,9 @@ function collectInput() {
 
   const m = Number(els.degree.value);
   let used = Array.from({ length: m + 1 }, (_, i) => i);
-  if (isManual()) {
+  if (m + 1 > n) {
+    errors.push(`Para grado ${m} necesitas ${m + 1} puntos y hay ${n}. Agrega ${m + 1 - n} ${m + 1 - n === 1 ? 'fila' : 'filas'} o elige un grado menor.`);
+  } else if (isManual()) {
     used = state.rows.map((r, i) => (r.use ? i : -1)).filter((i) => i >= 0);
     if (used.length !== m + 1) {
       errors.push(`Para grado ${m} debes marcar exactamente ${m + 1} puntos (marcados: ${used.length}).`);
@@ -289,7 +304,7 @@ function collectInput() {
     (invalid || els.formMsg).focus?.();
     return null;
   }
-  return { points, m, used, xEval: pe.value, mode: isManual() ? 'manual' : 'first', compare: els.compare.checked };
+  return { points, m, used, xEval: pe.value, mode: isManual() ? 'manual' : 'first' };
 }
 
 /* =========================================================
@@ -312,6 +327,7 @@ function renderEmpty() {
         <li>Polinomio de Newton</li>
         <li>Sustitución de x</li>
         <li>Resultado P<sub>m</sub>(x)</li>
+        <li>Polinomios de todos los grados</li>
         <li>Comparación de grados</li>
         <li>Gráfico</li>
       </ol>
@@ -336,7 +352,13 @@ function renderResults(sol) {
         <div class="summary-label">Resultado</div>
         <div class="summary-value">${P}(${x}) ≈ <strong>${fmt(sol.value)}</strong></div>
       </div>
-      <div class="summary-meta">Grado ${sol.m} · ${sol.m + 1} puntos · ${DEC} decimales</div>
+      <div class="summary-meta">
+        Grado ${sol.m} · ${sol.m + 1} puntos · ${DEC} decimales
+        <div class="inline-actions summary-actions no-print">
+          <button type="button" class="btn btn-ghost btn-sm" data-export="csv">Exportar CSV</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-export="print">Vista imprimible</button>
+        </div>
+      </div>
     </div>`,
     section(1, 'Datos ingresados y puntos utilizados', renderData(sol)),
     section(2, 'Tabla de diferencias divididas', renderTriangle(sol)),
@@ -346,9 +368,11 @@ function renderResults(sol) {
     section(6, `Sustitución de x = ${x}`, renderSubstitution(sol)),
     section(7, 'Resultado', renderFinal(sol), 'step-result'),
   ];
-  let num = 8;
-  if (sol.comparison) parts.push(section(num++, 'Comparación de todos los grados', renderComparison(sol)));
-  parts.push(section(num, 'Gráfico', renderChart(sol)));
+  parts.push(
+    section(8, 'Polinomios de todos los grados', renderAllDegrees(sol)),
+    section(9, 'Comparación de todos los grados', renderComparison(sol)),
+    section(10, 'Gráfico', renderChart(sol)),
+  );
   els.results.innerHTML = parts.join('');
 }
 
@@ -451,15 +475,25 @@ function renderCoefs(sol) {
   return `<p class="note">Los coeficientes son a<sub>j</sub> = D<sub>0,j</sub>, es decir, la primera fila de la tabla.</p><div class="coef-grid">${chips}</div>`;
 }
 
-function renderPolynomial(sol) {
-  const { m, coefs, xs } = sol;
-  const general = Array.from({ length: m + 1 }, (_, k) => {
+/** a0 + a1(x − x0) + … + am(x − x0)…(x − x_{m−1}) */
+function generalForm(m) {
+  return Array.from({ length: m + 1 }, (_, k) => {
     const factors = Array.from({ length: k }, (_, l) => `(<var>x</var> ${MINUS} ${xv(l)})`).join('');
     return `${k === 0 ? '' : ' + '}a<sub>${k}</sub>${factors}`;
   }).join('');
-  const values = signedSum(
+}
+
+/** Polinomio con coeficientes y nodos numéricos. */
+function valuesForm(coefs, xs) {
+  return signedSum(
     coefs.map((a, k) => ({ v: a, html: (abs) => `${fmt(abs)}${xs.slice(0, k).map(factorHTML).join('')}` })),
   );
+}
+
+function renderPolynomial(sol) {
+  const { m, coefs, xs } = sol;
+  const general = generalForm(m);
+  const values = valuesForm(coefs, xs);
   const nodes = xs.map((x, k) => `${xv(k)} = ${fmtIn(x)}`).join(', ');
   return `
     <h3 class="sub-title">Forma general</h3>
@@ -511,25 +545,100 @@ function renderFinal(sol) {
     </div>`;
 }
 
+/** Tarjeta de un grado g: nodos, fórmula, sustitución, operaciones y resultado. */
+function renderDegreeCard(d, xEval) {
+  const x = fmtIn(xEval);
+  const P = `P<sub>${d.g}</sub>`;
+  const nodeRows = d.xs
+    .map((xi, k) => `<tr><td>${k}</td><td>${fmtIn(xi)}</td><td>${fmtIn(d.ys[k])}</td></tr>`)
+    .join('');
+  const coefList = d.coefs.map((a, k) => `a<sub>${k}</sub> = ${fmt(a)}`).join('; ');
+  const substituted = d.terms
+    .map((t) => {
+      const body = t.k === 0
+        ? paren(t.a)
+        : `${paren(t.a)} · ${d.xs.slice(0, t.k).map((xk) => `(${minus(x, xk, fmtIn)})`).join('')}`;
+      return (t.k === 0 ? '' : ' + ') + body;
+    })
+    .join('');
+  const operations = d.terms
+    .map((t) => {
+      const lhs = t.k === 0 ? `a<sub>0</sub>` : `${paren(t.a)} · ${t.diffs.map((v) => `(${fmt(v)})`).join('')}`;
+      return `<li>Término ${t.k}: ${lhs} = <strong>${fmt(t.value)}</strong></li>`;
+    })
+    .join('');
+  const sum = signedSum(d.terms.map((t) => ({ v: t.value, html: (abs) => fmt(abs) })));
+  const extra = d.extrapolation ? ' <span class="tag tag-warn">Extrapolación</span>' : '';
+
+  return `
+    <details class="dd-group degree-card">
+      <summary>
+        <span class="degree-name">${P}(<var>x</var>), grado ${d.g}</span>
+        <span class="count">${d.g + 1} nodos: i = 0 … ${d.g}</span>
+        <span class="degree-peek">${P}(${x}) = <strong>${fmt(d.value)}</strong>${extra}</span>
+      </summary>
+      <div class="degree-body">
+      <ol class="degree-steps">
+        <li>
+          <h4>Nodos utilizados</h4>
+          <div class="table-scroll"><table class="data-table compact">
+            <thead><tr><th>i</th><th>x<sub>i</sub></th><th>f(x<sub>i</sub>)</th></tr></thead>
+            <tbody>${nodeRows}</tbody>
+          </table></div>
+        </li>
+        <li>
+          <h4>Fórmula de Newton</h4>
+          <div class="formula">${P}(<var>x</var>) = ${generalForm(d.g)}</div>
+        </li>
+        <li>
+          <h4>Con coeficientes y nodos</h4>
+          <p class="note">${coefList}</p>
+          <div class="formula">${P}(<var>x</var>) = ${valuesForm(d.coefs, d.xs)}</div>
+        </li>
+        <li>
+          <h4>Reemplazando <var>x</var> = ${x}</h4>
+          <div class="formula">${P}(${x}) = ${substituted}</div>
+        </li>
+        <li>
+          <h4>Operaciones</h4>
+          <ul class="degree-ops">${operations}</ul>
+          <div class="formula">${P}(${x}) = ${sum}</div>
+        </li>
+      </ol>
+      <div class="degree-result">${P}(${x}) = <strong>${fmt(d.value)}</strong></div>
+      </div>
+    </details>`;
+}
+
+function renderAllDegrees(sol) {
+  const manual = sol.mode === 'manual'
+    ? ' Esta sección no depende de la selección manual ni del grado elegido arriba.'
+    : ' Esta sección no depende del grado elegido para el desarrollo detallado.';
+  return `
+    <p class="note">Con n = ${sol.n} puntos se generan los polinomios P<sub>1</sub> hasta P<sub>${sol.n - 1}</sub>. Cada P<sub>g</sub> usa los primeros g + 1 puntos en el orden ingresado.${manual}</p>
+    <div class="inline-actions degree-toggle">
+      <button type="button" class="btn btn-ghost btn-sm" data-degrees="open">Mostrar todos</button>
+      <button type="button" class="btn btn-ghost btn-sm" data-degrees="close">Ocultar todos</button>
+    </div>
+    <div class="degree-list">${sol.degrees.map((d) => renderDegreeCard(d, sol.xEval)).join('')}</div>`;
+}
+
 function renderComparison(sol) {
-  const rows = sol.comparison
-    .map((c) => {
-      const current = sol.mode === 'first' && c.g === sol.m;
+  const x = fmtIn(sol.xEval);
+  const rows = sol.degrees
+    .map((d) => {
+      const current = sol.mode === 'first' && d.g === sol.m;
+      const nodes = d.xs.map((v) => fmtIn(v)).join(', ');
       return `<tr class="${current ? 'current-row' : ''}">
-        <td>${c.g}${current ? ' <span class="tag">actual</span>' : ''}</td>
-        <td>i = 0 … ${c.g} <span class="muted">(${c.xs.map((v) => fmtIn(v)).join(', ')})</span></td>
-        <td class="num-cell"><strong>${fmt(c.value)}</strong></td>
-        <td class="num-cell">${c.change === null ? '—' : fmt(c.change)}</td>
+        <td>${d.g}${current ? ' <span class="tag">desarrollado arriba</span>' : ''}</td>
+        <td>i = 0 … ${d.g} <span class="muted">(${nodes})</span></td>
+        <td class="num-cell"><strong>P<sub>${d.g}</sub>(${x}) = ${fmt(d.value)}</strong>${d.extrapolation ? ' <span class="tag tag-warn">Extrapolación</span>' : ''}</td>
       </tr>`;
     })
     .join('');
-  const note = sol.mode === 'manual'
-    ? 'La comparación usa siempre los primeros grado + 1 puntos en el orden ingresado; puede diferir del resultado principal, que usa tu selección manual.'
-    : 'Cada grado g usa los primeros g + 1 puntos en el orden ingresado.';
   return `
-    <p class="note">${note} La última columna muestra cuánto cambia el valor respecto al grado anterior (una estimación informal del error).</p>
     <div class="table-scroll"><table class="data-table">
-      <thead><tr><th>Grado</th><th>Puntos utilizados</th><th>P<sub>g</sub>(${fmtIn(sol.xEval)})</th><th>|P<sub>g</sub> − P<sub>g−1</sub>|</th></tr></thead>
+      <thead><tr><th>Grado</th><th>Nodos utilizados</th><th>Resultado</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>`;
 }
@@ -740,7 +849,12 @@ els.pasteApply.addEventListener('click', () => {
 
 els.degree.addEventListener('change', () => {
   state.degreeTouched = true;
+  const added = ensureRowsForDegree();
   updateDegreeHint();
+  if (added) {
+    els.degreeHint.innerHTML += ` Se agregaron ${added} ${added === 1 ? 'fila vacía' : 'filas vacías'} para completar los puntos.`;
+    els.body.querySelector(`input[data-row="${state.rows.length - added}"][data-field="x"]`)?.focus();
+  }
   updateSelectionHint();
 });
 
@@ -766,6 +880,31 @@ els.xEval.addEventListener('keydown', (e) => e.key === 'Enter' && calculate());
 
 els.calc.addEventListener('click', calculate);
 
+// Mostrar u ocultar todas las tarjetas de grado; exportar
+els.results.addEventListener('click', (e) => {
+  const action = e.target.closest('[data-degrees]')?.dataset.degrees;
+  if (action) els.results.querySelectorAll('.degree-card').forEach((d) => (d.open = action === 'open'));
+  const exp = e.target.closest('[data-export]')?.dataset.export;
+  if (exp === 'csv' && state.solution) exportCSV(state.solution);
+  if (exp === 'print' && state.solution) {
+    printReport(`<h1>Interpolación de Newton</h1>${printableClone(els.results)}`);
+  }
+});
+
+/** CSV con los datos, la tabla de diferencias divididas y los polinomios de todos los grados (precisión completa). */
+function exportCSV(sol) {
+  const num = (v) => (v === null || v === undefined ? '' : v);
+  const rows = [];
+  sol.points.forEach((p, i) => rows.push([i, p.x, p.y, sol.used.includes(i) ? 'sí' : 'no']));
+  rows.push([], ['Diferencias divididas (grado ' + sol.m + ')'], ['i', 'xi', ...Array.from({ length: sol.m + 1 }, (_, j) => `Orden ${j}`)]);
+  sol.xs.forEach((xi, i) => rows.push([i, xi, ...sol.D[i].map(num)]));
+  rows.push([], ['Coeficientes'], ...sol.coefs.map((a, k) => [`a${k}`, a]));
+  rows.push([], [`Resultado P${sol.m}(${sol.xEval})`, sol.value]);
+  rows.push([], ['Polinomios de todos los grados'], ['Grado', 'Nodos utilizados', 'Coeficientes', `Pg(${sol.xEval})`, 'Extrapolación']);
+  sol.degrees.forEach((d) => rows.push([d.g, d.xs.join('; '), d.coefs.join('; '), d.value, d.extrapolation ? 'sí' : 'no']));
+  downloadCSV('newton-interpolacion.csv', ['i', 'xi', 'f(xi)', 'Usado'], rows);
+}
+
 els.example.addEventListener('click', () => {
   state.degreeTouched = false;
   els.selFirst.checked = true;
@@ -780,7 +919,6 @@ els.clear.addEventListener('click', () => {
   state.degreeTouched = false;
   state.solution = null;
   els.selFirst.checked = true;
-  els.compare.checked = false;
   els.xEval.value = '';
   els.pasteArea.value = '';
   els.pasteMsg.textContent = '';
