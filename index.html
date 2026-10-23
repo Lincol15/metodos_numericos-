@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Laboratorio Numérico: Newton, Jacobi, regresión polinomial y Lagrange, paso a paso." />
+    <title>Laboratorio Numérico</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234f46e5'/%3E%3Cpath d='M6 22 C11 6, 17 26, 26 10' stroke='white' stroke-width='3' fill='none' stroke-linecap='round'/%3E%3C/svg%3E" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="container header-inner">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32"><path d="M5 23 C10 5, 17 27, 27 9" /></svg>
+        </div>
+        <div>
+          <p class="app-name">Laboratorio Numérico</p>
+          <h1 id="app-title">Newton Interpolante</h1>
+          <p class="subtitle" id="app-subtitle">Resuelve y comprende paso a paso</p>
+        </div>
+      </div>
+      <nav class="container tabs" role="tablist" aria-label="Métodos numéricos">
+        <button type="button" class="tab" role="tab" id="tab-newton" data-method="newton" aria-controls="panel-newton" aria-selected="true">Interpolación de Newton</button>
+        <button type="button" class="tab" role="tab" id="tab-jacobi" data-method="jacobi" aria-controls="panel-jacobi" aria-selected="false" tabindex="-1">Método de Jacobi</button>
+        <button type="button" class="tab" role="tab" id="tab-regression" data-method="regression" aria-controls="panel-regression" aria-selected="false" tabindex="-1">Regresión polinomial</button>
+        <button type="button" class="tab" role="tab" id="tab-lagrange" data-method="lagrange" aria-controls="panel-lagrange" aria-selected="false" tabindex="-1">Lagrange interpolante</button>
+      </nav>
+    </header>
+
+    <main>
+    <div class="container layout" id="panel-newton" role="tabpanel" aria-labelledby="tab-newton">
+      <!-- ================= ENTRADA ================= -->
+      <section class="card input-panel" aria-labelledby="input-title">
+        <h2 id="input-title" class="card-title">Datos del ejercicio</h2>
+
+        <div class="block">
+          <div class="block-head">
+            <h3>Tabla de puntos</h3>
+            <span id="points-count" class="badge"></span>
+          </div>
+          <p class="hint">Entre 2 y 20 puntos. Los valores x<sub>i</sub> deben ser distintos. Acepta negativos, cero y decimales (con punto o coma).</p>
+
+          <div class="table-scroll">
+            <table id="points-table" class="points-table">
+              <thead>
+                <tr>
+                  <th class="col-i">i</th>
+                  <th>x<sub>i</sub></th>
+                  <th>f(x<sub>i</sub>)</th>
+                  <th class="col-use" title="Puntos que se usarán">Usar</th>
+                  <th class="col-del"><span class="sr-only">Eliminar</span></th>
+                </tr>
+              </thead>
+              <tbody id="points-body"></tbody>
+            </table>
+          </div>
+
+          <div class="row-actions">
+            <button type="button" id="add-row" class="btn btn-ghost">
+              <span aria-hidden="true">＋</span> Agregar fila
+            </button>
+          </div>
+
+          <details class="paste-box">
+            <summary>Pegar dos columnas desde Excel</summary>
+            <p class="hint">
+              Copia las columnas x<sub>i</sub> y f(x<sub>i</sub>) en Excel y pégalas aquí (separadas por tabulaciones y saltos de línea).
+              Reemplaza los datos actuales. También puedes pegar directamente sobre cualquier celda de la tabla.
+            </p>
+            <textarea id="paste-area" rows="5" spellcheck="false" placeholder="1	0.7651977&#10;1.3	0.6200860&#10;1.6	0.4554022"></textarea>
+            <div class="paste-actions">
+              <button type="button" id="paste-apply" class="btn btn-secondary btn-sm">Insertar datos pegados</button>
+              <span id="paste-msg" class="inline-msg" role="status"></span>
+            </div>
+          </details>
+        </div>
+
+        <div class="block params">
+          <h3>Parámetros</h3>
+
+          <div class="field">
+            <label for="x-eval">Valor de x a evaluar</label>
+            <input id="x-eval" type="text" inputmode="decimal" autocomplete="off" placeholder="Ej. 1.5" />
+            <div id="x-eval-msg" class="field-msg" role="alert"></div>
+          </div>
+
+          <div class="field-row">
+            <div class="field">
+              <label for="degree">Grado del polinomio</label>
+              <select id="degree"></select>
+              <div id="degree-hint" class="hint small"></div>
+            </div>
+            <div class="field">
+              <label for="decimals">Decimales a mostrar</label>
+              <select id="decimals"></select>
+              <div class="hint small">Solo afecta la presentación.</div>
+            </div>
+          </div>
+
+          <fieldset class="field">
+            <legend>Puntos que se usarán</legend>
+            <div class="segmented">
+              <label><input type="radio" name="selection" id="sel-first" value="first" checked /> <span>Primeros grado + 1</span></label>
+              <label><input type="radio" name="selection" id="sel-manual" value="manual" /> <span>Elegir manualmente</span></label>
+            </div>
+            <div id="selection-hint" class="hint small"></div>
+          </fieldset>
+
+          <label class="check">
+            <input type="checkbox" id="compare-all" />
+            <span>Comparar todos los grados (1 a n − 1)</span>
+          </label>
+        </div>
+
+        <div id="form-msg" class="form-msg" role="alert"></div>
+
+        <div class="actions">
+          <button type="button" id="btn-calc" class="btn btn-primary">Calcular</button>
+          <button type="button" id="btn-example" class="btn btn-secondary">Cargar ejemplo</button>
+          <button type="button" id="btn-clear" class="btn btn-ghost">Limpiar</button>
+        </div>
+      </section>
+
+      <!-- ================= RESULTADOS ================= -->
+      <section id="results" class="results-panel" aria-live="polite"></section>
+    </div>
+
+    <!-- ================= MÉTODO DE JACOBI ================= -->
+    <div class="container layout layout-wide" id="panel-jacobi" role="tabpanel" aria-labelledby="tab-jacobi" hidden>
+      <section class="card input-panel" id="jac-input" aria-labelledby="jac-input-title">
+        <h2 id="jac-input-title" class="card-title">Sistema Ax = b</h2>
+
+        <div class="block">
+          <div class="field">
+            <label for="jac-size">Tamaño del sistema</label>
+            <select id="jac-size"></select>
+            <div class="hint small">De 2 a 10 incógnitas. Al cambiarlo se conservan los valores que sigan cabiendo.</div>
+          </div>
+        </div>
+
+        <div class="block">
+          <div class="block-head">
+            <h3>Matriz aumentada [A | b]</h3>
+            <span id="jac-size-badge" class="badge"></span>
+          </div>
+          <p class="hint">Cada fila es una ecuación. Acepta negativos, cero y decimales con punto o coma, sin separadores de miles. Los campos vacíos no se toman como cero.</p>
+          <div class="table-scroll">
+            <table id="jac-matrix" class="matrix-input"></table>
+          </div>
+
+          <h3 class="x0-title">Vector inicial x⁽⁰⁾</h3>
+          <div class="table-scroll">
+            <table id="jac-x0" class="matrix-input"></table>
+          </div>
+
+          <details class="paste-box">
+            <summary>Pegar matriz aumentada [A | b] desde Excel</summary>
+            <p class="hint">
+              Copia en Excel n filas con n + 1 columnas (los coeficientes de A y al final b) y pégalas aquí. El tamaño se ajusta solo.
+              También puedes pegar un bloque directamente sobre cualquier celda.
+            </p>
+            <textarea id="jac-paste" rows="5" spellcheck="false" aria-label="Matriz aumentada pegada desde Excel" placeholder="10	-1	2	6&#10;-1	11	-1	22&#10;2	-1	10	-10"></textarea>
+            <div class="paste-actions">
+              <button type="button" id="jac-paste-apply" class="btn btn-secondary btn-sm">Insertar matriz pegada</button>
+              <span id="jac-paste-msg" class="inline-msg" role="status"></span>
+            </div>
+          </details>
+        </div>
+
+        <div class="block params">
+          <h3>Parámetros</h3>
+          <div class="field-row">
+            <div class="field">
+              <label for="jac-tol">Tolerancia</label>
+              <input id="jac-tol" type="text" inputmode="decimal" autocomplete="off" value="0.0001" aria-describedby="jac-tol-msg" />
+              <div id="jac-tol-msg" class="field-msg"></div>
+            </div>
+            <div class="field">
+              <label for="jac-maxit">Máximo de iteraciones</label>
+              <input id="jac-maxit" type="text" inputmode="numeric" autocomplete="off" value="100" aria-describedby="jac-maxit-msg" />
+              <div id="jac-maxit-msg" class="field-msg"></div>
+            </div>
+          </div>
+          <div class="field">
+            <label for="jac-decimals">Decimales a mostrar</label>
+            <select id="jac-decimals"></select>
+            <div class="hint small">Solo afecta la presentación; el cálculo usa precisión completa.</div>
+          </div>
+        </div>
+
+        <div id="jac-form-msg" class="form-msg" role="alert"></div>
+
+        <div class="actions">
+          <button type="button" id="jac-solve" class="btn btn-primary">Resolver</button>
+          <button type="button" id="jac-example" class="btn btn-secondary">Cargar ejemplo</button>
+          <button type="button" id="jac-clear" class="btn btn-ghost">Limpiar</button>
+        </div>
+      </section>
+
+      <section id="jac-results" class="results-panel" aria-live="polite"></section>
+    </div>
+
+    <!-- ================= REGRESIÓN POLINOMIAL ================= -->
+    <div class="container layout" id="panel-regression" role="tabpanel" aria-labelledby="tab-regression" hidden>
+      <p class="panel-intro"><strong>Regresión e interpolación:</strong> la regresión busca un ajuste que minimice los residuos. La interpolación construye un polinomio que pasa por los nodos seleccionados.</p>
+      <section class="card input-panel" id="reg-input" aria-labelledby="reg-input-title">
+        <h2 id="reg-input-title" class="card-title">Datos y configuración</h2>
+        <div class="block" id="reg-points"></div>
+        <div id="reg-paste"></div>
+
+        <div class="block params">
+          <h3>Configuración</h3>
+          <div class="field-row">
+            <div class="field">
+              <label for="reg-degree">Grado m</label>
+              <select id="reg-degree" aria-describedby="reg-degree-hint"></select>
+            </div>
+            <div class="field">
+              <label for="reg-decimals">Decimales a mostrar</label>
+              <select id="reg-decimals"></select>
+            </div>
+          </div>
+          <div id="reg-degree-hint" class="hint small"></div>
+          <div class="field">
+            <label for="reg-predict">Valores de x para predecir (opcional)</label>
+            <textarea id="reg-predict" rows="2" spellcheck="false" placeholder="Ej.: 7; 8,5" aria-describedby="reg-predict-hint reg-predict-msg"></textarea>
+            <div id="reg-predict-hint" class="hint small"></div>
+            <div id="reg-predict-msg" class="field-msg" role="alert"></div>
+          </div>
+        </div>
+
+        <div id="reg-form-msg" class="form-msg" role="alert"></div>
+        <div class="actions">
+          <button type="button" id="reg-calc" class="btn btn-primary">Calcular</button>
+          <button type="button" id="reg-example" class="btn btn-secondary">Cargar ejemplo</button>
+          <button type="button" id="reg-clear" class="btn btn-ghost">Limpiar</button>
+        </div>
+
+        <details class="help-box">
+          <summary>Ayuda: método y símbolos</summary>
+          <p><strong>Regresión polinomial.</strong> Busca los coeficientes a<sub>0</sub>…a<sub>m</sub> de P<sub>m</sub>(x) = a<sub>0</sub> + a<sub>1</sub>x + … + a<sub>m</sub>x<sup>m</sup> que minimizan S<sub>r</sub> = Σ[y<sub>i</sub> − P<sub>m</sub>(x<sub>i</sub>)]². El polinomio no tiene por qué pasar por los datos.</p>
+          <dl class="symbols">
+            <dt>n</dt><dd>cantidad de datos</dd>
+            <dt>m</dt><dd>grado del polinomio</dd>
+            <dt>S<sub>k</sub>, T<sub>k</sub></dt><dd>Σx<sub>i</sub><sup>k</sup> y Σx<sub>i</sub><sup>k</sup>y<sub>i</sub></dd>
+            <dt>C, b</dt><dd>matriz y vector de las ecuaciones normales</dd>
+            <dt>e<sub>i</sub></dt><dd>residuo y<sub>i</sub> − P<sub>m</sub>(x<sub>i</sub>)</dd>
+            <dt>S<sub>r</sub>, S<sub>t</sub></dt><dd>suma de residuos al cuadrado; variabilidad total de y</dd>
+            <dt>gl, s</dt><dd>grados de libertad n − (m + 1); error estándar</dd>
+            <dt>R², R</dt><dd>coeficiente de determinación; R múltiple del ajuste</dd>
+            <dt>r<sub>xy</sub></dt><dd>correlación lineal de Pearson entre x e y</dd>
+          </dl>
+          <p><strong>Interpolación</strong>: estimar dentro del rango observado. <strong>Extrapolación</strong>: estimar fuera de él; es menos fiable porque no hay datos que respalden el modelo en esa zona.</p>
+        </details>
+      </section>
+      <section id="reg-results" class="results-panel" aria-live="polite"></section>
+    </div>
+
+    <!-- ================= LAGRANGE ================= -->
+    <div class="container layout" id="panel-lagrange" role="tabpanel" aria-labelledby="tab-lagrange" hidden>
+      <p class="panel-intro"><strong>Regresión e interpolación:</strong> la regresión busca un ajuste que minimice los residuos. La interpolación construye un polinomio que pasa por los nodos seleccionados.</p>
+      <section class="card input-panel" id="lag-input" aria-labelledby="lag-input-title">
+        <h2 id="lag-input-title" class="card-title">Datos y configuración</h2>
+        <div class="block" id="lag-points"></div>
+        <div id="lag-paste"></div>
+
+        <div class="block params">
+          <h3>Configuración</h3>
+          <div class="field-row">
+            <div class="field">
+              <label for="lag-target">Valor objetivo x*</label>
+              <input id="lag-target" type="text" inputmode="decimal" autocomplete="off" placeholder="Ej. 2.5" aria-describedby="lag-target-msg" />
+              <div id="lag-target-msg" class="field-msg" role="alert"></div>
+            </div>
+            <div class="field">
+              <label for="lag-real">Valor real conocido (opcional)</label>
+              <input id="lag-real" type="text" inputmode="decimal" autocomplete="off" placeholder="Para calcular errores" aria-describedby="lag-real-msg" />
+              <div id="lag-real-msg" class="field-msg" role="alert"></div>
+            </div>
+          </div>
+          <fieldset class="field">
+            <legend>Grados a comparar</legend>
+            <div id="lag-degrees" class="chips"></div>
+            <div id="lag-degrees-hint" class="hint small"></div>
+          </fieldset>
+          <fieldset class="field">
+            <legend>Selección de nodos</legend>
+            <div class="segmented">
+              <label><input type="radio" name="lag-mode" id="lag-auto" value="auto" checked /> <span>Automática (más cercanos)</span></label>
+              <label><input type="radio" name="lag-mode" id="lag-manual" value="manual" /> <span>Manual</span></label>
+            </div>
+            <div id="lag-manual-box" class="manual-box" hidden>
+              <label for="lag-manual-degree">Editando la selección del</label>
+              <select id="lag-manual-degree"></select>
+              <p class="hint small">Marca en la columna «Usar» exactamente g + 1 nodos para cada grado.</p>
+              <div id="lag-manual-hint" class="hint small" aria-live="polite"></div>
+            </div>
+          </fieldset>
+          <div class="field">
+            <label for="lag-decimals">Decimales a mostrar</label>
+            <select id="lag-decimals"></select>
+          </div>
+        </div>
+
+        <div id="lag-form-msg" class="form-msg" role="alert"></div>
+        <div class="actions">
+          <button type="button" id="lag-calc" class="btn btn-primary">Calcular</button>
+          <button type="button" id="lag-example" class="btn btn-secondary">Cargar ejemplo</button>
+          <button type="button" id="lag-clear" class="btn btn-ghost">Limpiar</button>
+        </div>
+
+        <details class="help-box">
+          <summary>Ayuda: método y símbolos</summary>
+          <p><strong>Interpolación de Lagrange.</strong> Con g + 1 nodos de x distintos existe un único polinomio de grado como máximo g que pasa por todos ellos: P<sub>g</sub>(x) = Σ y<sub>i</sub>L<sub>i</sub>(x).</p>
+          <dl class="symbols">
+            <dt>x*</dt><dd>valor objetivo donde se evalúa</dd>
+            <dt>g</dt><dd>grado; usa g + 1 nodos</dd>
+            <dt>L<sub>i</sub>(x)</dt><dd>función base Π<sub>j≠i</sub> (x − x<sub>j</sub>)/(x<sub>i</sub> − x<sub>j</sub>); vale 1 en x<sub>i</sub> y 0 en los otros nodos</dd>
+            <dt>w<sub>i</sub></dt><dd>peso baricéntrico 1/Π<sub>j≠i</sub>(x<sub>i</sub> − x<sub>j</sub>), usado para evaluar de forma estable</dd>
+          </dl>
+          <p><strong>Interpolación</strong>: x* dentro del intervalo de los nodos usados. <strong>Extrapolación</strong>: fuera de él; suele ser mucho menos fiable. La regresión, en cambio, no exige pasar por los datos.</p>
+        </details>
+      </section>
+      <section id="lag-results" class="results-panel" aria-live="polite"></section>
+    </div>
+    </main>
+
+    <footer class="app-footer container">
+      Métodos numéricos paso a paso · Los cálculos usan precisión completa y solo se redondean al mostrar.
+    </footer>
+
+    <script type="module" src="/src/main.js"></script>
+    <div id="print-root" aria-hidden="true"></div>
+  </body>
+</html>
